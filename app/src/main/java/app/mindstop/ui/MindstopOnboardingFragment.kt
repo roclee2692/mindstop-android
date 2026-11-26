@@ -8,15 +8,15 @@ import android.provider.Settings
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import androidx.core.net.toUri
 import androidx.fragment.app.Fragment
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import neth.iecal.curbox.R
 import neth.iecal.curbox.databinding.FragmentMindstopOnboardingBinding
 import neth.iecal.curbox.services.AppBlockerService
 import neth.iecal.curbox.ui.activity.FragmentActivity
 import neth.iecal.curbox.utils.PermissionUtils
 
-/** Clean, calm onboarding for Mindstop without unrelated Curbox steps. */
+/** Clean, OEM-adapted onboarding with a guided sequential permission wizard. */
 class MindstopOnboardingFragment : Fragment() {
 
     companion object {
@@ -25,6 +25,7 @@ class MindstopOnboardingFragment : Fragment() {
 
     private var _binding: FragmentMindstopOnboardingBinding? = null
     private val binding get() = _binding!!
+    private var wizardStepInProgress: OemPermissionRouter.PermissionStep? = null
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
         _binding = FragmentMindstopOnboardingBinding.inflate(inflater, container, false)
@@ -32,14 +33,33 @@ class MindstopOnboardingFragment : Fragment() {
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        val ctx = requireContext()
+        binding.onboardOemLabel.text = getString(
+            R.string.mindstop_oem_detected_label,
+            OemPermissionRouter.deviceDisplayLabel(ctx)
+        )
+        binding.onboardBgDesc.text = OemPermissionRouter.batteryGuideText(ctx)
+
+        binding.onboardWizardBtn.setOnClickListener {
+            val next = OemPermissionRouter.pendingSteps(ctx, includeExactAlarm = false).firstOrNull()
+            if (next != null) {
+                wizardStepInProgress = next
+                OemPermissionRouter.openStep(ctx, next)
+            }
+        }
         binding.onboardA11yBtn.setOnClickListener {
-            PermissionUtils.openAccessibilityServiceScreen(requireContext(), AppBlockerService::class.java)
+            OemPermissionRouter.openAccessibility(ctx)
         }
         binding.onboardOverlayBtn.setOnClickListener {
-            startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, "package:${requireContext().packageName}".toUri()))
+            OemPermissionRouter.openOverlay(ctx)
         }
         binding.onboardBgBtn.setOnClickListener {
-            startActivity(Intent(requireContext(), MindstopDiagnosticsActivity::class.java))
+            val pm = ctx.getSystemService(Context.POWER_SERVICE) as PowerManager
+            if (!pm.isIgnoringBatteryOptimizations(ctx.packageName)) {
+                OemPermissionRouter.openBatteryOptimization(ctx)
+            } else {
+                startActivity(Intent(ctx, MindstopDiagnosticsActivity::class.java))
+            }
         }
         binding.onboardStart.setOnClickListener { finishOnboarding() }
         binding.onboardSkip.setOnClickListener { finishOnboarding() }
@@ -47,7 +67,22 @@ class MindstopOnboardingFragment : Fragment() {
 
     override fun onResume() {
         super.onResume()
-        refreshChecks()
+        val pending = refreshChecks()
+        val justFinished = wizardStepInProgress
+        wizardStepInProgress = null
+        if (justFinished != null && justFinished !in pending && pending.isNotEmpty() && isAdded) {
+            val ctx = requireContext()
+            val next = pending.first()
+            MaterialAlertDialogBuilder(ctx)
+                .setTitle(getString(R.string.mindstop_wizard_step_done_title, OemPermissionRouter.stepTitle(ctx, justFinished)))
+                .setMessage(getString(R.string.mindstop_wizard_step_next_msg, OemPermissionRouter.stepTitle(ctx, next), pending.size))
+                .setPositiveButton(R.string.mindstop_wizard_continue_btn) { _, _ ->
+                    wizardStepInProgress = next
+                    OemPermissionRouter.openStep(ctx, next)
+                }
+                .setNegativeButton(R.string.mindstop_wizard_later_btn, null)
+                .show()
+        }
     }
 
     override fun onDestroyView() {
@@ -55,7 +90,7 @@ class MindstopOnboardingFragment : Fragment() {
         super.onDestroyView()
     }
 
-    private fun refreshChecks() {
+    private fun refreshChecks(): List<OemPermissionRouter.PermissionStep> {
         val ctx = requireContext()
         val a11yOn = PermissionUtils.isAccessibilityServiceEnabled(ctx, AppBlockerService::class.java)
         val overlayOn = Settings.canDrawOverlays(ctx)
@@ -66,8 +101,28 @@ class MindstopOnboardingFragment : Fragment() {
 
         binding.onboardA11yStatus.text = getString(if (a11yOn) R.string.mindstop_diag_ok else R.string.mindstop_diag_missing)
         binding.onboardOverlayStatus.text = getString(if (overlayOn) R.string.mindstop_diag_ok else R.string.mindstop_diag_missing)
-        binding.onboardBgStatus.text = getString(if (bgOk) R.string.mindstop_diag_ok else R.string.mindstop_diag_check_manually)
+        binding.onboardBgStatus.text = getString(if (bgOk) R.string.mindstop_diag_ok else R.string.mindstop_diag_missing)
+        binding.onboardBgBtn.text = getString(
+            if (batteryOk) R.string.mindstop_diag_open_settings else R.string.mindstop_oem_battery_onetap_btn
+        )
         binding.onboardStart.isEnabled = a11yOn
+
+        val pending = OemPermissionRouter.pendingSteps(ctx, includeExactAlarm = false)
+        if (pending.isEmpty()) {
+            binding.onboardWizardSummary.text = getString(R.string.mindstop_wizard_all_ready)
+            binding.onboardWizardBtn.isEnabled = false
+            binding.onboardWizardBtn.text = getString(R.string.mindstop_wizard_all_ready_btn)
+        } else {
+            val next = pending.first()
+            binding.onboardWizardSummary.text = getString(R.string.mindstop_wizard_pending_summary, pending.size)
+            binding.onboardWizardBtn.isEnabled = true
+            binding.onboardWizardBtn.text = getString(
+                R.string.mindstop_wizard_next_btn,
+                OemPermissionRouter.stepTitle(ctx, next),
+                pending.size
+            )
+        }
+        return pending
     }
 
     private fun finishOnboarding() {

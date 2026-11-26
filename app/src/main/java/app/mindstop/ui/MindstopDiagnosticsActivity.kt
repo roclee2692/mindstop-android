@@ -1,34 +1,37 @@
 package app.mindstop.ui
 
-import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
+import android.view.View
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.net.toUri
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import app.mindstop.core.OemFamily
+import app.mindstop.core.OemProfile
 import app.mindstop.service.QuotaRepository
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import neth.iecal.curbox.R
 import neth.iecal.curbox.databinding.ActivityMindstopDiagnosticsBinding
-import neth.iecal.curbox.hardcoded.OemAutostartIntents
 import neth.iecal.curbox.services.AppBlockerService
 import neth.iecal.curbox.utils.PermissionUtils
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
-/** Permission and event diagnostics for the quota engine, aimed at Xiaomi style OEM problems. */
+/** Permission and event diagnostics with OEM-aware deep links and a guided one-tap wizard. */
 class MindstopDiagnosticsActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMindstopDiagnosticsBinding
     private lateinit var repo: QuotaRepository
     private val timeFormat = SimpleDateFormat("MM-dd HH:mm:ss", Locale.getDefault())
+    private var wizardStepInProgress: OemPermissionRouter.PermissionStep? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -38,32 +41,39 @@ class MindstopDiagnosticsActivity : AppCompatActivity() {
         MindstopUi.setupToolbar(this, binding.diagToolbar, R.string.mindstop_title_diagnostics)
         repo = QuotaRepository(this)
 
+        binding.diagOemLabel.text = getString(
+            R.string.mindstop_oem_detected_label,
+            OemPermissionRouter.deviceDisplayLabel(this)
+        )
+        binding.diagAccessibilityTip.text = OemPermissionRouter.accessibilityGuideText(this)
+        binding.diagBatteryTip.text = OemPermissionRouter.batteryGuideText(this)
+        binding.diagBgPopupHelp.text = OemPermissionRouter.bgPopupGuideText(this)
+        binding.diagAutostartTip.text = OemPermissionRouter.autostartGuideText(this)
+
+        binding.diagWizardButton.setOnClickListener {
+            val next = OemPermissionRouter.pendingSteps(this, includeExactAlarm = true).firstOrNull()
+            if (next != null) {
+                wizardStepInProgress = next
+                OemPermissionRouter.openStep(this, next)
+            }
+        }
         binding.diagAccessibilityButton.setOnClickListener {
-            PermissionUtils.openAccessibilityServiceScreen(this, AppBlockerService::class.java)
+            OemPermissionRouter.openAccessibility(this)
         }
         binding.diagOverlayButton.setOnClickListener {
-            startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, "package:$packageName".toUri()))
+            OemPermissionRouter.openOverlay(this)
         }
         binding.diagBatteryButton.setOnClickListener {
-            if (MindstopUi.isXiaomiFamily()) {
-                startActivity(
-                    Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, "package:$packageName".toUri())
-                )
-            } else {
-                startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
-            }
+            OemPermissionRouter.openBatteryOptimization(this)
         }
         binding.diagBgPopupButton.setOnClickListener {
-            startActivity(MindstopUi.openMiuiPermissionsIntent(this))
+            OemPermissionRouter.openBackgroundPopup(this)
         }
         binding.diagAutostartButton.setOnClickListener {
-            val intent = OemAutostartIntents.resolveAutostartIntent(this)
-            if (intent != null) startActivity(intent)
+            OemPermissionRouter.openAutostart(this)
         }
         binding.diagExactAlarmButton.setOnClickListener {
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
-                startActivity(Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM, "package:$packageName".toUri()))
-            }
+            OemPermissionRouter.openExactAlarm(this)
         }
 
         lifecycleScope.launch {
@@ -85,39 +95,73 @@ class MindstopDiagnosticsActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        refreshChecks()
+        val pending = refreshChecks()
+        val justFinished = wizardStepInProgress
+        wizardStepInProgress = null
+        if (justFinished != null && justFinished !in pending && pending.isNotEmpty()) {
+            val next = pending.first()
+            MaterialAlertDialogBuilder(this)
+                .setTitle(getString(R.string.mindstop_wizard_step_done_title, OemPermissionRouter.stepTitle(this, justFinished)))
+                .setMessage(getString(R.string.mindstop_wizard_step_next_msg, OemPermissionRouter.stepTitle(this, next), pending.size))
+                .setPositiveButton(R.string.mindstop_wizard_continue_btn) { _, _ ->
+                    wizardStepInProgress = next
+                    OemPermissionRouter.openStep(this, next)
+                }
+                .setNegativeButton(R.string.mindstop_wizard_later_btn, null)
+                .show()
+        }
     }
 
-    private fun refreshChecks() {
+    private fun refreshChecks(): List<OemPermissionRouter.PermissionStep> {
         val accessibilityOn = PermissionUtils.isAccessibilityServiceEnabled(this, AppBlockerService::class.java)
         val overlayOn = Settings.canDrawOverlays(this)
         val powerManager = getSystemService(POWER_SERVICE) as PowerManager
         val batteryOk = powerManager.isIgnoringBatteryOptimizations(packageName)
-        val aggressiveOem = OemAutostartIntents.isLikelyAggressiveOem()
-        val autostartAvailable = aggressiveOem && OemAutostartIntents.resolveAutostartIntent(this) != null
+        val family = OemPermissionRouter.currentFamily()
+        val needsPopup = OemProfile.needsBackgroundPopupPermission(family)
+        val needsAutostart = OemProfile.needsAutostartStep(family)
 
         binding.diagAccessibilityStatus.text = statusText(accessibilityOn)
         binding.diagOverlayStatus.text = statusText(overlayOn)
         binding.diagBatteryStatus.text = statusText(batteryOk)
-        val xiaomi = MindstopUi.isXiaomiFamily()
-        binding.diagBgPopupSection.visibility = if (xiaomi) android.view.View.VISIBLE else android.view.View.GONE
-        if (xiaomi) {
-            val allowed = MindstopUi.isMiuiBackgroundPopupAllowed(this)
+        binding.diagBatteryButton.text = getString(
+            if (batteryOk) R.string.mindstop_oem_battery_check_oem_btn else R.string.mindstop_oem_battery_onetap_btn
+        )
+
+        binding.diagBgPopupSection.visibility = if (needsPopup) View.VISIBLE else View.GONE
+        if (needsPopup) {
+            val allowed = if (family == OemFamily.XIAOMI) MindstopUi.isMiuiBackgroundPopupAllowed(this) else null
             binding.diagBgPopupStatus.text = when (allowed) {
                 true -> getString(R.string.mindstop_diag_ok)
                 false -> getString(R.string.mindstop_diag_missing)
                 null -> getString(R.string.mindstop_diag_check_manually)
             }
         }
-        binding.diagAutostartStatus.text = when {
-            !aggressiveOem -> getString(R.string.mindstop_diag_not_needed)
-            autostartAvailable -> getString(R.string.mindstop_diag_check_manually)
-            else -> getString(R.string.mindstop_diag_check_manually)
-        }
-        binding.diagAutostartButton.isEnabled = autostartAvailable
+
+        binding.diagAutostartStatus.text = getString(
+            if (needsAutostart) R.string.mindstop_diag_check_manually else R.string.mindstop_diag_not_needed
+        )
+        binding.diagAutostartButton.isEnabled = needsAutostart
+
         val exactAlarmOk = app.mindstop.service.MindstopAlarmScheduler.canScheduleExact(this)
         binding.diagExactAlarmStatus.text = statusText(exactAlarmOk)
-        binding.diagExactAlarmButton.isEnabled = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S
+        binding.diagExactAlarmButton.isEnabled = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+
+        val pending = OemPermissionRouter.pendingSteps(this, includeExactAlarm = true)
+        if (pending.isEmpty()) {
+            binding.diagWizardSummary.text = getString(R.string.mindstop_wizard_all_ready)
+            binding.diagWizardButton.isEnabled = false
+            binding.diagWizardButton.text = getString(R.string.mindstop_wizard_all_ready_btn)
+        } else {
+            val next = pending.first()
+            binding.diagWizardSummary.text = getString(R.string.mindstop_wizard_pending_summary, pending.size)
+            binding.diagWizardButton.isEnabled = true
+            binding.diagWizardButton.text = getString(
+                R.string.mindstop_wizard_next_btn,
+                OemPermissionRouter.stepTitle(this, next),
+                pending.size
+            )
+        }
 
         lifecycleScope.launch {
             val dayKey = app.mindstop.core.DayKeys.dayKey(System.currentTimeMillis())
@@ -129,6 +173,7 @@ class MindstopDiagnosticsActivity : AppCompatActivity() {
                 (totalMs / 60_000L)
             )
         }
+        return pending
     }
 
     private fun statusText(ok: Boolean): String =
