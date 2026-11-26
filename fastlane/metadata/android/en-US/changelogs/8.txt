@@ -1,0 +1,8 @@
+MindStop v0.3.0 (First Public Release)
+
+- Shared app quotas, smart preset app group scanner, intention gate, calm wait, and collapsible Today quota summary
+- Independent Study Mode, Elastic Focus with lookup interrupt budget, math/English/CSV challenges, and Ginkgo Growth World
+- 100 curated offline bilingual daily quotes (zero internet permission)
+- Bedtime Wind-down with workday/weekend schedules and 6-stage progressive reminders
+- Morning Activation with exact alarms, lock-screen ringing, math/step/QR/NFC dismiss options, and 15-minute wake-up transition
+- Intentional Shopping with 6-intent launch gate, share-sheet import, unit-price P25/P50/P75 analysis, 3-2-1 stopping rules, 24h cooling wishlist, and expense/refund tracking
