@@ -1,0 +1,6 @@
+<resources>
+    <color name="mindstop_icon_green">#135138</color>
+    <color name="mindstop_icon_ivory">#F9F5E9</color>
+    <color name="mindstop_splash_bg">#F4F2E9</color>
+    <style name="Theme.Curbox.Launch" parent="Theme.Curbox" />
+</resources>

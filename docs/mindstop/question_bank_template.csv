@@ -1,0 +1,11 @@
+type,question,option_a,option_b,option_c,option_d,answer,explanation,difficulty
+word,reluctant,愿意的,不情愿的,可靠的,迅速的,B,adj. 不情愿的；勉强的,1
+word,inevitable,可避免的,不可避免的,微不足道的,临时的,B,adj. 不可避免的；必然发生的,1
+word,resilient,脆弱的,有弹性的,犹豫的,僵硬的,B,adj. 有恢复力的；有弹性的,2
+word,substantiate,削弱,证实,忽略,拖延,B,v. 证实；用证据支持,3
+synonym,alleviate the pressure,increase,ignore,reduce,create,C,alleviate 意为缓解、减轻，与 reduce 最接近,2
+synonym,scrutinize the proposal,examine closely,reject quickly,copy directly,forget easily,A,scrutinize 意为仔细审查，与 examine closely 最接近,2
+synonym,ambiguous statement,unclear,accurate,brief,loud,A,ambiguous 意为含糊不清的，与 unclear 最接近,1
+custom,TCP 协议工作在 OSI 模型的哪一层？,应用层,网络层,传输层,数据链路层,C,TCP 属于传输层（第 4 层）,1
+custom,HTTP 响应状态码 404 表示什么含义？,请求成功,未找到资源,服务器内部错误,需要重新认证,B,404 Not Found 表示请求的资源不存在,1
+custom,在算法复杂度中，二分查找的时间复杂度是？,O(1),O(log n),O(n),O(n log n),B,有序数组二分查找每次将区间减半，复杂度为 O(log n),1

@@ -1,0 +1,27 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="32"
+    android:viewportHeight="32"
+    android:tint="?attr/colorControlNormal">
+    <!-- Minimalist symmetrical hourglass outline with rounded caps -->
+    <path
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2.2"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M8,4.5H24M8,27.5H24M9.5,4.5V9C9.5,12.2 12.6,14.3 14.5,16C12.6,17.7 9.5,19.8 9.5,23V27.5M22.5,4.5V9C22.5,12.2 19.4,14.3 17.5,16C19.4,17.7 22.5,19.8 22.5,23V27.5" />
+    <!-- Upper upright ginkgo fan silhouette -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M16,12.4C14.6,10.2 12.4,9.6 11.7,8.4C12.3,7.1 14.3,6.6 15.6,7.8L16,8.7L16.4,7.8C17.7,6.6 19.7,7.1 20.3,8.4C19.6,9.6 17.4,10.2 16,12.4Z" />
+    <!-- Lower inverted ginkgo fan silhouette -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M16,19.6C14.6,21.8 12.4,22.4 11.7,23.6C12.3,24.9 14.3,25.4 15.6,24.2L16,23.3L16.4,24.2C17.7,25.4 19.7,24.9 20.3,23.6C19.6,22.4 17.4,21.8 16,19.6Z" />
+    <!-- Centered plump oval ginkgo seed -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M16,14.1C17.15,14.1 17.95,14.95 17.95,16C17.95,17.05 17.15,17.9 16,17.9C14.85,17.9 14.05,17.05 14.05,16C14.05,14.95 14.85,14.1 16,14.1Z" />
+</vector>

@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Mindstop’s poster, quotes, and appearance controls ship in English and Simplified Chinese. -->
+<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
+    <string name="mindstop_view_poster">Poster</string>
+    <string name="mindstop_daily_quote">Daily quote</string>
+    <string name="mindstop_next_quote">Next quote</string>
+    <string name="mindstop_poster_slogan">Enjoy technology.\nOwn your time.\nLive your life.</string>
+    <string name="mindstop_poster_slogan_secondary">享受科技。\n掌控时间。\n回归生活。</string>
+    <string name="mindstop_poster_choice">True freedom isn’t doing\nwhatever you want.\nIt’s choosing when to start\nand when to stop.</string>
+    <string name="mindstop_quote_enjoy">Enjoy the moment. Choose when it ends.</string>
+    <string name="mindstop_quote_promise">You kept another promise to yourself today.</string>
+    <string name="mindstop_quote_rest">Rest is part of the plan, too.</string>
+    <string name="mindstop_quote_return">Noticing a distraction is the first step back to your goal.</string>
+    <string name="mindstop_quote_next">Keep the next move yours.</string>
+    <string name="mindstop_quote_room">Stop when you choose, and make time for what matters.</string>
+    <string name="mindstop_quote_small">Every time you stop as planned, it counts.</string>
+    <string name="mindstop_quote_enough">When it feels like enough, you can stop.</string>
+    <string name="mindstop_quote_choice">Ask yourself what you want to do with this moment.</string>
+    <string name="mindstop_quote_dao">Know what is enough and when to stop. Then you can endure.</string>
+    <string name="mindstop_quote_dao_source">Tao Te Ching, chapter 44</string>
+    <string name="mindstop_quote_walden">I went to the woods because I wished to live deliberately</string>
+    <string name="mindstop_quote_walden_source">Henry David Thoreau, Walden</string>
+    <string name="mindstop_settings_language">Language</string>
+    <string name="mindstop_settings_language_value">Language · %1$s</string>
+    <string name="mindstop_settings_theme">Theme</string>
+    <string name="mindstop_settings_theme_value">Theme · %1$s</string>
+    <string name="mindstop_settings_follow_system">Follow system</string>
+    <string name="mindstop_language_chinese" translatable="false">简体中文</string>
+    <string name="mindstop_language_english" translatable="false">English</string>
+    <string name="mindstop_theme_light">Light green</string>
+    <string name="mindstop_theme_dark">Deep green</string>
+    <string name="mindstop_settings_appearance_error">Couldn’t save or load appearance settings.</string>
+</resources>

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="mindstop_view_poster">海报</string>
+    <string name="mindstop_daily_quote">每日寄语</string>
+    <string name="mindstop_next_quote">换一句</string>
+    <string name="mindstop_poster_slogan">享受科技。\n掌控时间。\n回归生活。</string>
+    <string name="mindstop_poster_slogan_secondary">Enjoy technology.\nOwn your time.\nLive your life.</string>
+    <string name="mindstop_poster_choice">真正的自由，\n不是想做什么就做什么，\n而是能够选择什么时候开始，\n什么时候结束。</string>
+    <string name="mindstop_quote_enjoy">你可以享受这一刻，也可以决定何时结束。</string>
+    <string name="mindstop_quote_promise">今天又兑现了一个对自己的承诺。</string>
+    <string name="mindstop_quote_rest">休息也是计划的一部分。</string>
+    <string name="mindstop_quote_return">发现走神，就是回到目标的开始。</string>
+    <string name="mindstop_quote_next">把下一步留给自己。</string>
+    <string name="mindstop_quote_room">适时停下，给在意的事留一点时间。</string>
+    <string name="mindstop_quote_small">每一次按计划停下，都算数。</string>
+    <string name="mindstop_quote_enough">觉得够了，就可以停下。</string>
+    <string name="mindstop_quote_choice">先问问自己，这一刻想做什么。</string>
+    <string name="mindstop_quote_dao">知足不辱，知止不殆，可以长久。</string>
+    <string name="mindstop_quote_dao_source">《道德经》第四十四章</string>
+    <string name="mindstop_quote_walden">我走进树林，因为我想有意识地生活。</string>
+    <string name="mindstop_quote_walden_source">梭罗《瓦尔登湖》</string>
+    <string name="mindstop_settings_language">语言</string>
+    <string name="mindstop_settings_language_value">语言 · %1$s</string>
+    <string name="mindstop_settings_theme">主题</string>
+    <string name="mindstop_settings_theme_value">主题 · %1$s</string>
+    <string name="mindstop_settings_follow_system">跟随系统</string>
+    <string name="mindstop_theme_light">浅绿</string>
+    <string name="mindstop_theme_dark">深绿</string>
+    <string name="mindstop_settings_appearance_error">无法保存或读取外观设置。</string>
+</resources>

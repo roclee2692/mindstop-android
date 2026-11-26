@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:id="@+id/nav_mindstop_today"
+        android:icon="@drawable/ic_timer_aesthetic"
+        android:title="@string/mindstop_tab_today" />
+    <item
+        android:id="@+id/nav_mindstop_rules"
+        android:icon="@drawable/ic_app_blocker_aesthetic"
+        android:title="@string/mindstop_tab_rules" />
+    <item
+        android:id="@+id/nav_mindstop_growth"
+        android:icon="@drawable/ic_mindstop_hourglass"
+        android:title="@string/mindstop_tab_growth" />
+    <item
+        android:id="@+id/nav_mindstop_settings"
+        android:icon="@drawable/baseline_settings_24"
+        android:title="@string/mindstop_tab_settings" />
+</menu>

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The Play Store flavor ships offline, without the UI hider
+     and anti uninstall features. Their components are stripped from the merged
+     manifest here so this build never holds the device admin capability. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <!-- Play Store builds keep the per toggle Shizuku path for grayscale and never
+         request the secure settings permission. -->
+    <uses-permission
+        android:name="android.permission.WRITE_SECURE_SETTINGS"
+        tools:node="remove" />
+
+    <!-- Play flags "run in background" (battery optimization exemption) as a
+         sensitive permission, so the playstore flavor drops it. -->
+    <uses-permission
+        android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
+        tools:node="remove" />
+
+    <application>
+        <!-- Anti uninstall relies on device admin, which Play Store builds drop. -->
+        <receiver
+            android:name=".receivers.AdminReceiver"
+            tools:node="remove" />
+
+        <!-- The UI hider's node inspection service is dropped as well. -->
+        <service
+            android:name=".services.NodePickerService"
+            tools:node="remove" />
+    </application>
+</manifest>

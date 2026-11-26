@@ -1,0 +1,6 @@
+type,question,option_a,option_b,option_c,option_d,answer,explanation,difficulty
+word,reluctant,愿意的,不情愿的,可靠的,迅速的,B,不情愿的,1
+synonym,alleviate the pressure,increase,ignore,reduce,create,C,减轻压力,2
+custom,TCP属于哪一层？,应用层,网络层,传输层,数据链路层,C,TCP属于传输层,1
+custom,"含逗号的题目示例：1,2,3 中最大的数是？",1,2,3,4,C,"选项与题目里可以有逗号，要用英文双引号包住整格",1
+custom,"引号示例：""Hello"" 有几个字母？",4,5,6,7,B,"格子里的双引号写成两个 """"",2

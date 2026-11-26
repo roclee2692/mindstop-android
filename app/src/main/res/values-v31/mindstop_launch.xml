@@ -1,0 +1,6 @@
+<resources>
+    <style name="Theme.Curbox.Launch" parent="Theme.Curbox">
+        <item name="android:windowSplashScreenBackground">@color/mindstop_splash_bg</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@mipmap/ic_mindstop_launcher</item>
+    </style>
+</resources>

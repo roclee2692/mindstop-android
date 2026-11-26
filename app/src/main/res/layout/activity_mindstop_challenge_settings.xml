@@ -1,0 +1,179 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/cs_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="?attr/colorSurface"
+    android:orientation="vertical">
+
+    <com.google.android.material.appbar.MaterialToolbar
+        android:id="@+id/cs_toolbar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="?attr/colorSurface" />
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:fillViewport="true">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="20dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/mindstop_cs_tiers"
+                android:textAppearance="?attr/textAppearanceBodyMedium"
+                android:textColor="?attr/colorOnSurfaceVariant" />
+
+            <LinearLayout
+                android:id="@+id/cs_tier_container"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:orientation="vertical" />
+
+            <com.google.android.material.textfield.TextInputLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:hint="@string/mindstop_cs_max_hint">
+
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/cs_max_renewals"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:inputType="number" />
+            </com.google.android.material.textfield.TextInputLayout>
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20dp"
+                android:text="@string/mindstop_cs_types"
+                android:textAppearance="?attr/textAppearanceTitleMedium" />
+
+            <com.google.android.material.checkbox.MaterialCheckBox
+                android:id="@+id/cs_type_math"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/mindstop_type_math" />
+
+            <com.google.android.material.checkbox.MaterialCheckBox
+                android:id="@+id/cs_type_word"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/mindstop_type_word" />
+
+            <com.google.android.material.checkbox.MaterialCheckBox
+                android:id="@+id/cs_type_synonym"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/mindstop_type_synonym" />
+
+            <com.google.android.material.checkbox.MaterialCheckBox
+                android:id="@+id/cs_type_custom"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/mindstop_type_custom" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20dp"
+                android:text="@string/mindstop_cs_difficulty"
+                android:textAppearance="?attr/textAppearanceTitleMedium" />
+
+            <RadioGroup
+                android:id="@+id/cs_difficulty_group"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <RadioButton
+                    android:id="@+id/cs_difficulty_easy"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/mindstop_cs_easy" />
+
+                <RadioButton
+                    android:id="@+id/cs_difficulty_medium"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/mindstop_cs_medium" />
+
+                <RadioButton
+                    android:id="@+id/cs_difficulty_hard"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/mindstop_cs_hard" />
+            </RadioGroup>
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20dp"
+                android:text="@string/mindstop_cs_wrong"
+                android:textAppearance="?attr/textAppearanceTitleMedium" />
+
+            <RadioGroup
+                android:id="@+id/cs_wrong_group"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical">
+
+                <RadioButton
+                    android:id="@+id/cs_wrong_next"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/mindstop_cs_wrong_next" />
+
+                <RadioButton
+                    android:id="@+id/cs_wrong_add_one"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/mindstop_cs_wrong_add_one" />
+
+                <RadioButton
+                    android:id="@+id/cs_wrong_reset"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/mindstop_cs_wrong_reset" />
+            </RadioGroup>
+
+            <com.google.android.material.textfield.TextInputLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:hint="@string/mindstop_cs_cooldown_hint">
+
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/cs_cooldown_minutes"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:inputType="number" />
+            </com.google.android.material.textfield.TextInputLayout>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/cs_save"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="24dp"
+                android:text="@string/mindstop_rule_save" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/cs_open_bank"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/mindstop_open_question_bank" />
+
+        </LinearLayout>
+    </ScrollView>
+</LinearLayout>
