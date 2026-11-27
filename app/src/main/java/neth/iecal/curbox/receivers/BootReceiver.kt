@@ -14,12 +14,17 @@ import neth.iecal.curbox.utils.ServiceProtectionManager
  */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
+        val pending = goAsync()
         try {
             ServiceWatchdogJob.schedule(context)
             ServiceProtectionManager.healNow(context)
-            app.mindstop.service.MindstopAlarmScheduler.rescheduleAllAsync(context)
+            app.mindstop.service.MindstopAlarmScheduler.rescheduleAllAsync(context, pending)
         } catch (e: Exception) {
             Log.e("BootReceiver", "boot repair failed", e)
+            try {
+                pending.finish()
+            } catch (_: Exception) {
+            }
         }
     }
 }

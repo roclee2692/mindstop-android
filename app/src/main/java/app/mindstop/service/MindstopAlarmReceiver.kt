@@ -46,7 +46,7 @@ class MindstopAlarmReceiver : BroadcastReceiver() {
             Intent.ACTION_TIMEZONE_CHANGED,
             Intent.ACTION_BOOT_COMPLETED,
             Intent.ACTION_MY_PACKAGE_REPLACED -> {
-                MindstopAlarmScheduler.rescheduleAllAsync(context)
+                MindstopAlarmScheduler.rescheduleAllAsync(context, goAsync())
                 return
             }
             ACTION_FIRE_ALARM -> handleFireAlarm(context, intent)
@@ -67,6 +67,7 @@ class MindstopAlarmReceiver : BroadcastReceiver() {
             try {
                 val repo = MorningRepository(appCtx)
                 val alarm = repo.getAlarm(alarmId) ?: return@launch
+                if (!alarm.enabled && !isSnooze) return@launch
                 val now = System.currentTimeMillis()
                 // Upupup reliability pattern: re-arm next occurrence immediately for repeating alarms.
                 if (!isSnooze) {
@@ -81,7 +82,16 @@ class MindstopAlarmReceiver : BroadcastReceiver() {
                     putExtra(EXTRA_ALARM_ID, alarm.id)
                     putExtra(EXTRA_SESSION_ID, session.id)
                 }
-                ContextCompat.startForegroundService(appCtx, serviceIntent)
+                try {
+                    ContextCompat.startForegroundService(appCtx, serviceIntent)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Foreground alarm service start blocked; posting fallback ring notification", e)
+                    val ringIntent = Intent(appCtx, app.mindstop.ui.MindstopAlarmRingActivity::class.java).apply {
+                        putExtra(EXTRA_ALARM_ID, alarm.id)
+                        putExtra(EXTRA_SESSION_ID, session.id)
+                    }
+                    BackgroundActivityLauncher.launch(appCtx, ringIntent, ((alarm.id.toInt() and 0x7FFF) + 64_000))
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed firing morning alarm $alarmId", e)
             } finally {

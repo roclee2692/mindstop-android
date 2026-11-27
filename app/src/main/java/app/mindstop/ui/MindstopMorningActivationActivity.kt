@@ -1,6 +1,9 @@
 package app.mindstop.ui
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
@@ -11,6 +14,7 @@ import android.os.Looper
 import android.widget.CheckBox
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import app.mindstop.core.BodyWakeActivity
 import app.mindstop.core.MorningAlarm
@@ -19,6 +23,7 @@ import app.mindstop.core.MorningSessionRecord
 import app.mindstop.core.RewardEngine
 import app.mindstop.service.MindstopAlarmReceiver
 import app.mindstop.service.MindstopAlarmScheduler
+import app.mindstop.service.MindstopAlarmService
 import app.mindstop.service.MorningRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -44,11 +49,33 @@ class MindstopMorningActivationActivity : AppCompatActivity(), SensorEventListen
     private var alarm: MorningAlarm = MorningAlarm()
     private var sensorManager: SensorManager? = null
     private var motionRecorded = false
+    private var busy = false
 
     private val ticker = object : Runnable {
         override fun run() {
             updateCountdown()
             handler.postDelayed(this, 1_000L)
+        }
+    }
+
+    private val alarmRingReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != MindstopAlarmService.ACTION_ALARM_RINGING) return
+            val ringAlarmId = intent.getLongExtra(MindstopAlarmReceiver.EXTRA_ALARM_ID, -1L)
+            val ringSessionId = intent.getLongExtra(MindstopAlarmReceiver.EXTRA_SESSION_ID, -1L)
+            if (ringAlarmId > 0L) openActiveRingScreen(ringAlarmId, ringSessionId)
+        }
+    }
+
+    private fun openActiveRingScreen(ringAlarmId: Long, ringSessionId: Long) {
+        val ring = Intent(this, MindstopAlarmRingActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            putExtra(MindstopAlarmReceiver.EXTRA_ALARM_ID, ringAlarmId)
+            putExtra(MindstopAlarmReceiver.EXTRA_SESSION_ID, ringSessionId)
+        }
+        try {
+            startActivity(ring)
+        } catch (_: Exception) {
         }
     }
 
@@ -67,6 +94,20 @@ class MindstopMorningActivationActivity : AppCompatActivity(), SensorEventListen
         binding.activationCompleteBtn.setOnClickListener { completeActivation() }
         binding.activationBackToBedBtn.setOnClickListener { reportReturnedToBed() }
 
+        loadSessionFromIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        busy = false
+        motionRecorded = false
+        loadSessionFromIntent(intent)
+    }
+
+    private fun loadSessionFromIntent(source: Intent) {
+        sessionId = source.getLongExtra(MindstopAlarmReceiver.EXTRA_SESSION_ID, -1L)
+        alarmId = source.getLongExtra(MindstopAlarmReceiver.EXTRA_ALARM_ID, -1L)
         lifecycleScope.launch {
             val now = System.currentTimeMillis()
             val loadedSession = withContext(Dispatchers.IO) {
@@ -87,9 +128,22 @@ class MindstopMorningActivationActivity : AppCompatActivity(), SensorEventListen
     override fun onResume() {
         super.onResume()
         handler.post(ticker)
+        ContextCompat.registerReceiver(
+            this,
+            alarmRingReceiver,
+            IntentFilter(MindstopAlarmService.ACTION_ALARM_RINGING),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        if (MindstopAlarmService.isRinging()) {
+            openActiveRingScreen(MindstopAlarmService.activeAlarmId, MindstopAlarmService.activeSessionId)
+        }
     }
 
     override fun onPause() {
+        try {
+            unregisterReceiver(alarmRingReceiver)
+        } catch (_: Exception) {
+        }
         handler.removeCallbacks(ticker)
         super.onPause()
     }
@@ -141,9 +195,10 @@ class MindstopMorningActivationActivity : AppCompatActivity(), SensorEventListen
 
     private fun confirm5m() {
         val sid = sessionId.takeIf { it > 0L } ?: return
+        if (busy) return
+        binding.activationCheck5Btn.isEnabled = false
         lifecycleScope.launch {
             withContext(Dispatchers.IO) { repo.markCheck5m(sid, System.currentTimeMillis()) }
-            binding.activationCheck5Btn.isEnabled = false
             binding.activationCheck5Btn.setText(R.string.mindstop_morning_act_check5_done)
             Toast.makeText(this@MindstopMorningActivationActivity, R.string.mindstop_morning_act_check5_toast, Toast.LENGTH_SHORT).show()
         }
@@ -151,6 +206,8 @@ class MindstopMorningActivationActivity : AppCompatActivity(), SensorEventListen
 
     private fun completeActivation() {
         val sid = sessionId.takeIf { it > 0L } ?: return
+        if (busy) return
+        busy = true
         lifecycleScope.launch {
             val (_, confirmed) = withContext(Dispatchers.IO) {
                 repo.completeActivation(sid, System.currentTimeMillis())
@@ -168,6 +225,8 @@ class MindstopMorningActivationActivity : AppCompatActivity(), SensorEventListen
 
     private fun reportReturnedToBed() {
         val sid = sessionId.takeIf { it > 0L } ?: return
+        if (busy) return
+        busy = true
         lifecycleScope.launch {
             withContext(Dispatchers.IO) { repo.reportReturnedToBed(sid, System.currentTimeMillis()) }
             MindstopAlarmScheduler.cancelActivationCheckins(this@MindstopMorningActivationActivity, sid)

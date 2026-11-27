@@ -29,7 +29,9 @@ class MindstopShareImportActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         repo = ShoppingRepository(this)
         val raw = if (intent?.action == Intent.ACTION_SEND && intent.type?.startsWith("text/") == true) {
-            intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty()
+            val subject = intent.getStringExtra(Intent.EXTRA_SUBJECT).orEmpty().trim()
+            val text = intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty().trim()
+            if (subject.isNotBlank() && !text.contains(subject)) "$subject $text".trim() else text
         } else {
             ""
         }
@@ -38,7 +40,9 @@ class MindstopShareImportActivity : AppCompatActivity() {
             finish()
             return
         }
-        showImportDialog(parsed.title, parsed.url)
+        if (!isFinishing && !isDestroyed) {
+            showImportDialog(parsed.title, parsed.url)
+        }
     }
 
     private fun showImportDialog(initialTitle: String, url: String) {

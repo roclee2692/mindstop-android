@@ -128,6 +128,76 @@ class MindstopReminderOverlay(private val context: Context) {
         card.animate().alpha(0.92f).setDuration(300L).start()
     }
 
+    /**
+     * Touchable high-visibility overlay bar rendered inside the AccessibilityService process.
+     * Used as a bulletproof fallback when Android 14-16 / HyperOS throttles a background Activity
+     * launch (e.g. intention gate right after swiping recents, or a 2nd alarm while unlocked).
+     */
+    @SuppressLint("InflateParams")
+    fun showActionBanner(
+        title: String,
+        actionText: String,
+        onAction: () -> Unit,
+        holdMs: Long = ACTION_HOLD_MS
+    ) {
+        hide()
+        val density = context.resources.displayMetrics.density
+        val row = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding((18 * density).toInt(), (12 * density).toInt(), (14 * density).toInt(), (12 * density).toInt())
+            background = android.graphics.drawable.GradientDrawable().apply {
+                cornerRadius = 22 * density
+                setColor(0xF5153A2A.toInt())
+                setStroke((1.5f * density).toInt().coerceAtLeast(1), 0xEE7CE8B2.toInt())
+            }
+            setOnClickListener {
+                hide()
+                onAction()
+            }
+        }
+        row.addView(TextView(context).apply {
+            text = title
+            textSize = 14f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(0xFFF3FBF6.toInt())
+            maxWidth = (220 * density).toInt()
+        })
+        row.addView(TextView(context).apply {
+            text = actionText
+            textSize = 13.5f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(0xFF103022.toInt())
+            setPadding((12 * density).toInt(), (6 * density).toInt(), (12 * density).toInt(), (6 * density).toInt())
+            background = android.graphics.drawable.GradientDrawable().apply {
+                cornerRadius = 16 * density
+                setColor(0xFF8BE7B9.toInt())
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                marginStart = (12 * density).toInt()
+            }
+        })
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            y = (48 * density).toInt()
+        }
+        try {
+            windowManager.addView(row, params)
+            view = row
+            if (holdMs > 0L) handler.postDelayed(dismisser, holdMs)
+        } catch (_: Exception) {
+        }
+    }
+
     private fun attach(target: View, holdMs: Long, belowPill: Boolean) {
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -164,5 +234,6 @@ class MindstopReminderOverlay(private val context: Context) {
         const val HOLD_MS = 6_000L
         const val REWARD_HOLD_MS = 4_500L
         const val NIGHT_REWARD_HOLD_MS = 3_800L
+        const val ACTION_HOLD_MS = 12_000L
     }
 }

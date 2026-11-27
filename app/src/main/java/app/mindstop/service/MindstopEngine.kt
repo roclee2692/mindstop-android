@@ -10,6 +10,7 @@ import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
 import android.view.accessibility.AccessibilityEvent
+import androidx.core.content.ContextCompat
 import app.mindstop.core.BedtimeEngine
 import app.mindstop.core.BedtimeEvaluation
 import app.mindstop.core.BedtimePhase
@@ -65,7 +66,8 @@ class MindstopEngine {
         const val SESSION_GAP_MS = 10 * 60_000L
         const val EMERGENCY_UNLOCK_MS = 5 * 60_000L
         const val PROMPT_MIN_GAP_MS = 1_500L
-        const val PROMPT_RETRY_MS = 10_000L
+        const val PROMPT_RETRY_MS = 4_000L
+        const val PROMPT_VERIFY_DELAY_MS = 900L
         const val BLOCK_MIN_GAP_MS = 1_500L
         const val KEY_BEDTIME_ALLOW_UNTIL = "bedtime_allow_until"
         private val IGNORED_PACKAGES = setOf("com.android.systemui")
@@ -220,6 +222,7 @@ class MindstopEngine {
         if (packageName != null) {
             evaluateAndBlock(packageName, nowElapsed, nowWall, foregroundChanged = changed)
         } else if (changed) {
+            clearPromptFallback()
             hideSessionOverlay()
         }
     }
@@ -300,10 +303,15 @@ class MindstopEngine {
 
     private var lastPromptElapsed = Long.MIN_VALUE / 2
     private var lastBlockElapsed = Long.MIN_VALUE / 2
+    private var pendingPromptVerify: Runnable? = null
+    @Volatile private var promptFallbackShowing = false
+    @Volatile private var openedRingSessionId: Long = -1L
+    @Volatile private var alarmOverlayShowing = false
 
     /**
-     * Opens the intention prompt. A foreground change always opens it; while the user stays in the
-     * app without answering, it comes back every [PROMPT_RETRY_MS].
+     * Opens the intention prompt using Android 14+ BAL-safe launch. If HyperOS or the OS drops
+     * the cold-start Activity launch (for instance right after MindStop was swiped from Recents),
+     * verifies 900ms later, retries once, and surfaces a touchable in-service overlay fallback bar.
      */
     private fun promptIntention(packageName: String, sessionId: Long, mode: PromptMode, force: Boolean, nowElapsed: Long) {
         val since = nowElapsed - lastPromptElapsed
@@ -311,18 +319,56 @@ class MindstopEngine {
         lastPromptElapsed = nowElapsed
         mainHandler.post {
             if (destroyed) return@post
-            val intent = Intent(service, app.mindstop.ui.MindstopIntentionActivity::class.java).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                putExtra(app.mindstop.ui.MindstopIntentionActivity.EXTRA_PACKAGE, packageName)
-                putExtra(app.mindstop.ui.MindstopIntentionActivity.EXTRA_SESSION_ID, sessionId)
-                putExtra(app.mindstop.ui.MindstopIntentionActivity.EXTRA_MODE, mode.name)
+            val intent = buildIntentionIntent(packageName, sessionId, mode)
+            val reqCode = ((sessionId.toInt() xor packageName.hashCode()) and 0x3FFF) + 71_000
+            BackgroundActivityLauncher.launch(service, intent, reqCode)
+
+            pendingPromptVerify?.let { mainHandler.removeCallbacks(it) }
+            val verify = Runnable {
+                if (destroyed || !screenOn) return@Runnable
+                if (activeWindowPackage() != packageName) return@Runnable
+                // Activity did not reach foreground; retry once and show touchable overlay fallback.
+                val retryIntent = buildIntentionIntent(packageName, sessionId, mode)
+                BackgroundActivityLauncher.launch(service, retryIntent, reqCode + 1)
+                promptFallbackShowing = true
+                reminderOverlay.showActionBanner(
+                    title = service.getString(neth.iecal.curbox.R.string.mindstop_intention_overlay_fallback_title),
+                    actionText = service.getString(neth.iecal.curbox.R.string.mindstop_intention_overlay_fallback_btn),
+                    onAction = {
+                        promptFallbackShowing = false
+                        BackgroundActivityLauncher.launch(
+                            service,
+                            buildIntentionIntent(packageName, sessionId, mode),
+                            reqCode + 2
+                        )
+                    }
+                )
+                scope.launch {
+                    repo.logEvent("intention_launch_fallback", "$packageName ${mode.name}", trustedNow())
+                }
             }
-            try {
-                service.startActivity(intent)
-            } catch (_: Exception) {
+            pendingPromptVerify = verify
+            mainHandler.postDelayed(verify, PROMPT_VERIFY_DELAY_MS)
+        }
+    }
+
+    private fun clearPromptFallback() {
+        mainHandler.post {
+            pendingPromptVerify?.let { mainHandler.removeCallbacks(it) }
+            pendingPromptVerify = null
+            if (promptFallbackShowing) {
+                promptFallbackShowing = false
+                if (!destroyed && !alarmOverlayShowing) reminderOverlay.hide()
             }
         }
     }
+
+    private fun buildIntentionIntent(packageName: String, sessionId: Long, mode: PromptMode): Intent =
+        Intent(service, app.mindstop.ui.MindstopIntentionActivity::class.java).apply {
+            putExtra(app.mindstop.ui.MindstopIntentionActivity.EXTRA_PACKAGE, packageName)
+            putExtra(app.mindstop.ui.MindstopIntentionActivity.EXTRA_SESSION_ID, sessionId)
+            putExtra(app.mindstop.ui.MindstopIntentionActivity.EXTRA_MODE, mode.name)
+        }
 
     /** The user ended the session from the floating panel. The session itself goes on, so its limits keep counting. */
     private fun endByUser(status: IntentStatus) {
@@ -655,9 +701,12 @@ class MindstopEngine {
                     putExtra(MindstopBlockActivity.EXTRA_BEDTIME_LOW_STIM, bedtime.reduceStimulation)
                 }
             }
-            try {
-                service.startActivity(intent)
-            } catch (_: Exception) {
+            val launched = BackgroundActivityLauncher.launch(
+                service,
+                intent,
+                (packageName.hashCode() and 0x3FFF) + 75_000
+            )
+            if (!launched) {
                 service.pressHome()
             }
         }
@@ -696,6 +745,7 @@ class MindstopEngine {
                 return
             }
         }
+        clearPromptFallback()
         checkReminders(verdict, dayKey, sessionId, intent, sessionUsed, settings, nowWall)
         updateSessionOverlay(intent, sessionUsed, verdict, settings, nowElapsed, isActiveStudy, nightFunLeftMs)
     }
@@ -898,7 +948,57 @@ class MindstopEngine {
         }
     }
 
-    // Screen state
+    // Screen & alarm-ring coordination
+
+    private val alarmRingReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (destroyed) return
+            when (intent?.action) {
+                MindstopAlarmService.ACTION_ALARM_UI_OPENED -> {
+                    val openedSid = intent.getLongExtra(MindstopAlarmReceiver.EXTRA_SESSION_ID, -1L)
+                    openedRingSessionId = openedSid
+                    if (alarmOverlayShowing) {
+                        alarmOverlayShowing = false
+                        mainHandler.post { if (!destroyed) reminderOverlay.hide() }
+                    }
+                }
+                MindstopAlarmService.ACTION_ALARM_STOPPED -> {
+                    openedRingSessionId = -1L
+                    alarmOverlayShowing = false
+                    mainHandler.post { if (!destroyed) reminderOverlay.hide() }
+                }
+                MindstopAlarmService.ACTION_ALARM_RINGING -> {
+                    val alarmId = intent.getLongExtra(MindstopAlarmReceiver.EXTRA_ALARM_ID, -1L)
+                    val sessionId = intent.getLongExtra(MindstopAlarmReceiver.EXTRA_SESSION_ID, -1L)
+                    if (alarmId <= 0L) return
+                    mainHandler.postDelayed({
+                        if (destroyed || openedRingSessionId == sessionId) return@postDelayed
+                        val ringIntent = Intent(service, app.mindstop.ui.MindstopAlarmRingActivity::class.java).apply {
+                            putExtra(MindstopAlarmReceiver.EXTRA_ALARM_ID, alarmId)
+                            putExtra(MindstopAlarmReceiver.EXTRA_SESSION_ID, sessionId)
+                        }
+                        val reqCode = ((alarmId xor sessionId).toInt() and 0x3FFF) + 65_000
+                        BackgroundActivityLauncher.launch(service, ringIntent, reqCode)
+                        // Ultimate safety net: if MindstopAlarmRingActivity still hasn't resumed 800ms later,
+                        // display a persistent touchable overlay button directly from AccessibilityService.
+                        mainHandler.postDelayed({
+                            if (destroyed || openedRingSessionId == sessionId) return@postDelayed
+                            alarmOverlayShowing = true
+                            reminderOverlay.showActionBanner(
+                                title = service.getString(neth.iecal.curbox.R.string.mindstop_morning_overlay_ringing_title),
+                                actionText = service.getString(neth.iecal.curbox.R.string.mindstop_morning_ring_open_btn),
+                                onAction = {
+                                    alarmOverlayShowing = false
+                                    BackgroundActivityLauncher.launch(service, ringIntent, reqCode + 1)
+                                },
+                                holdMs = 0L
+                            )
+                        }, 800L)
+                    }, 550L)
+                }
+            }
+        }
+    }
 
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -938,7 +1038,13 @@ class MindstopEngine {
             addAction(Intent.ACTION_SCREEN_OFF)
             addAction(Intent.ACTION_USER_PRESENT)
         }
-        service.registerReceiver(screenReceiver, filter)
+        ContextCompat.registerReceiver(service, screenReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+        val alarmFilter = IntentFilter().apply {
+            addAction(MindstopAlarmService.ACTION_ALARM_RINGING)
+            addAction(MindstopAlarmService.ACTION_ALARM_STOPPED)
+            addAction(MindstopAlarmService.ACTION_ALARM_UI_OPENED)
+        }
+        ContextCompat.registerReceiver(service, alarmRingReceiver, alarmFilter, ContextCompat.RECEIVER_NOT_EXPORTED)
     }
 
     fun onDestroy() {
@@ -967,6 +1073,10 @@ class MindstopEngine {
             scope.cancel()
             try {
                 service.unregisterReceiver(screenReceiver)
+            } catch (_: Exception) {
+            }
+            try {
+                service.unregisterReceiver(alarmRingReceiver)
             } catch (_: Exception) {
             }
         }

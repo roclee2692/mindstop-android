@@ -91,7 +91,10 @@ object MindstopAlarmScheduler {
         am.cancel(checkinPendingIntent(context, sessionId, 0L, MindstopAlarmReceiver.ACTION_BACKUP_REMIND))
     }
 
-    fun rescheduleAllAsync(context: Context) {
+    fun rescheduleAllAsync(
+        context: Context,
+        pendingResult: android.content.BroadcastReceiver.PendingResult? = null
+    ) {
         val appCtx = context.applicationContext
         CoroutineScope(Dispatchers.IO).launch {
             try {
@@ -102,6 +105,11 @@ object MindstopAlarmScheduler {
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to reschedule Mindstop alarms", e)
+            } finally {
+                try {
+                    pendingResult?.finish()
+                } catch (_: Exception) {
+                }
             }
         }
     }

@@ -206,9 +206,16 @@ class MindstopBedtimeActivity : AppCompatActivity() {
         val cooldown = binding.bedtimeCooldownInput.text?.toString()?.trim()?.toIntOrNull()
 
         val wkndSeparate = binding.bedtimeWeekendSwitch.isChecked
-        val wkndSleep = parseHhMm(binding.bedtimeWeekendSleepInput.text?.toString()) ?: loadedSettings.weekendSleepMinutesOfDay
-        val wkndWake = parseHhMm(binding.bedtimeWeekendWakeInput.text?.toString()) ?: loadedSettings.weekendWakeMinutesOfDay
-        val wkndFunEnd = parseHhMm(binding.bedtimeWeekendFunEndInput.text?.toString()) ?: loadedSettings.weekendFunEndMinutesOfDay
+        val wkndSleepParsed = parseHhMm(binding.bedtimeWeekendSleepInput.text?.toString())
+        val wkndWakeParsed = parseHhMm(binding.bedtimeWeekendWakeInput.text?.toString())
+        val wkndFunEndParsed = parseHhMm(binding.bedtimeWeekendFunEndInput.text?.toString())
+        if (wkndSeparate && (wkndSleepParsed == null || wkndWakeParsed == null || wkndFunEndParsed == null)) {
+            Toast.makeText(this, R.string.mindstop_bedtime_invalid, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val wkndSleep = wkndSleepParsed ?: loadedSettings.weekendSleepMinutesOfDay
+        val wkndWake = wkndWakeParsed ?: loadedSettings.weekendWakeMinutesOfDay
+        val wkndFunEnd = wkndFunEndParsed ?: loadedSettings.weekendFunEndMinutesOfDay
 
         if (startMin == null || endMin == null || funEndMin == null ||
             freeMin == null || freeMin !in 0..180 ||
@@ -357,7 +364,7 @@ class MindstopBedtimeActivity : AppCompatActivity() {
     }
 
     private fun parseHhMm(raw: String?): Int? {
-        val text = raw?.trim().orEmpty()
+        val text = raw?.trim().orEmpty().replace('：', ':')
         val parts = text.split(':')
         if (parts.size != 2) return null
         val h = parts[0].toIntOrNull() ?: return null

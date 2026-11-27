@@ -98,6 +98,10 @@ class MindstopAlarmRingActivity : AppCompatActivity(), SensorEventListener {
         repo = MorningRepository(this)
         alarmId = intent.getLongExtra(MindstopAlarmReceiver.EXTRA_ALARM_ID, -1L)
         sessionId = intent.getLongExtra(MindstopAlarmReceiver.EXTRA_SESSION_ID, -1L)
+        if (alarmId <= 0L && MindstopAlarmService.isRinging()) {
+            alarmId = MindstopAlarmService.activeAlarmId
+            sessionId = MindstopAlarmService.activeSessionId
+        }
         mathSeed = System.currentTimeMillis()
         nfcAdapter = NfcAdapter.getDefaultAdapter(this)
 
@@ -112,21 +116,38 @@ class MindstopAlarmRingActivity : AppCompatActivity(), SensorEventListener {
         binding.ringSnoozeBtn.setOnClickListener { snooze() }
 
         lifecycleScope.launch {
-            val loaded = withContext(Dispatchers.IO) {
-                if (alarmId > 0L) repo.getAlarm(alarmId) else null
-            } ?: MorningAlarm(id = alarmId)
-            alarm = loaded
-            binding.ringLabel.text = alarm.label.ifBlank { getString(R.string.mindstop_morning_ring_default_label) }
-            binding.ringSnoozeBtn.text = getString(R.string.mindstop_morning_ring_snooze_min, alarm.snoozeMinutes)
-            setupChallenge()
+            loadAlarmAndSetup()
         }
+    }
+
+    private suspend fun loadAlarmAndSetup() {
+        val loaded = withContext(Dispatchers.IO) {
+            if (alarmId > 0L) repo.getAlarm(alarmId) else null
+        } ?: MorningAlarm(id = alarmId)
+        alarm = loaded
+        binding.ringLabel.text = alarm.label.ifBlank { getString(R.string.mindstop_morning_ring_default_label) }
+        binding.ringSnoozeBtn.text = getString(R.string.mindstop_morning_ring_snooze_min, alarm.snoozeMinutes)
+        setupChallenge()
     }
 
     override fun onResume() {
         super.onResume()
         clockHandler.post(clockTicker)
+        notifyRingUiOpened()
         if (alarm.dismissMethod == WakeupConfirmMethod.NFC && !challengePassed) {
             enableNfcDispatch()
+        }
+    }
+
+    private fun notifyRingUiOpened() {
+        try {
+            val bc = Intent(MindstopAlarmService.ACTION_ALARM_UI_OPENED).apply {
+                setPackage(packageName)
+                putExtra(MindstopAlarmReceiver.EXTRA_ALARM_ID, alarmId)
+                putExtra(MindstopAlarmReceiver.EXTRA_SESSION_ID, sessionId)
+            }
+            sendBroadcast(bc)
+        } catch (_: Exception) {
         }
     }
 
@@ -143,6 +164,23 @@ class MindstopAlarmRingActivity : AppCompatActivity(), SensorEventListener {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        val incomingAlarmId = intent.getLongExtra(MindstopAlarmReceiver.EXTRA_ALARM_ID, -1L)
+        val incomingSessionId = intent.getLongExtra(MindstopAlarmReceiver.EXTRA_SESSION_ID, -1L)
+        if (incomingAlarmId > 0L && (incomingAlarmId != alarmId || incomingSessionId != sessionId || busy)) {
+            setIntent(intent)
+            sensorManager?.unregisterListener(this)
+            disableNfcDispatch()
+            alarmId = incomingAlarmId
+            sessionId = incomingSessionId
+            busy = false
+            challengePassed = false
+            mathSolved = 0
+            mathIndex = 0
+            mathSeed = System.currentTimeMillis()
+            stepsCount = 0
+            lifecycleScope.launch { loadAlarmAndSetup() }
+            return
+        }
         if (alarm.dismissMethod == WakeupConfirmMethod.NFC && !challengePassed) {
             @Suppress("DEPRECATION")
             val tag: Tag? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -177,6 +215,9 @@ class MindstopAlarmRingActivity : AppCompatActivity(), SensorEventListener {
     }
 
     private fun setupChallenge() {
+        // Reset visibility cleanly in case onNewIntent reloads a second alarm with a different method.
+        binding.ringChallengeAction.visibility = View.VISIBLE
+        binding.ringChallengeAction.setOnClickListener(null)
         when (alarm.dismissMethod) {
             WakeupConfirmMethod.MANUAL -> {
                 challengePassed = true
@@ -288,7 +329,7 @@ class MindstopAlarmRingActivity : AppCompatActivity(), SensorEventListener {
             this,
             0,
             Intent(this, javaClass).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
-            PendingIntent.FLAG_MUTABLE
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
         )
         try {
             adapter.enableForegroundDispatch(this, pi, null, null)
@@ -328,10 +369,11 @@ class MindstopAlarmRingActivity : AppCompatActivity(), SensorEventListener {
             )
             startActivity(
                 Intent(this@MindstopAlarmRingActivity, MindstopMorningActivationActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                     .putExtra(MindstopAlarmReceiver.EXTRA_SESSION_ID, sid)
                     .putExtra(MindstopAlarmReceiver.EXTRA_ALARM_ID, alarm.id)
             )
-            finish()
+            finishAndRemoveTask()
         }
     }
 
@@ -343,6 +385,6 @@ class MindstopAlarmRingActivity : AppCompatActivity(), SensorEventListener {
             MindstopAlarmScheduler.scheduleSnooze(this, alarm.id, alarm.snoozeMinutes)
         }
         Toast.makeText(this, getString(R.string.mindstop_morning_snoozed_toast, alarm.snoozeMinutes), Toast.LENGTH_SHORT).show()
-        finish()
+        finishAndRemoveTask()
     }
 }

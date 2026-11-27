@@ -1355,4 +1355,9 @@
     <string name="mindstop_wizard_step_next_msg">还剩 %2$d 项，是否立即继续开启「%1$s」？</string>
     <string name="mindstop_wizard_continue_btn">继续下一项</string>
     <string name="mindstop_wizard_later_btn">稍后再说</string>
+    <string name="mindstop_morning_ring_open_btn">打开关闭页</string>
+    <string name="mindstop_morning_ring_stop_quick_btn">直接关闭闹钟</string>
+    <string name="mindstop_morning_overlay_ringing_title">晨间闹钟正在响铃</string>
+    <string name="mindstop_intention_overlay_fallback_title">请先确认本次使用目的</string>
+    <string name="mindstop_intention_overlay_fallback_btn">立即确认</string>
 </resources>

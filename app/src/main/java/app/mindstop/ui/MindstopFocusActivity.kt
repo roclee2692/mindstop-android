@@ -46,6 +46,8 @@ class MindstopFocusActivity : AppCompatActivity() {
 
     private var whitelist: Set<String> = emptySet()
     private var activeState: ActiveFocusState? = null
+    private var tickInFlight = false
+    private var uiTickCounter = 0
     private val handler = Handler(Looper.getMainLooper())
     private val ticker = object : Runnable {
         override fun run() {
@@ -142,23 +144,34 @@ class MindstopFocusActivity : AppCompatActivity() {
 
     private fun tickActiveOnUi() {
         val current = activeState ?: return
-        if (!current.isActive) return
+        if (!current.isActive || tickInFlight) return
+        tickInFlight = true
+        uiTickCounter++
         lifecycleScope.launch {
-            val now = withContext(Dispatchers.IO) { quotaRepo.approxTrustedNow() }
-            val result = FocusEngine.tick(current, now)
-            if (result.justCompleted) {
-                withContext(Dispatchers.IO) { stage5.finishFocusSession(result.state, now) }
-                activeState = null
-                renderState(null)
-                Toast.makeText(
-                    this@MindstopFocusActivity,
-                    getString(R.string.mindstop_focus_completed_toast, RewardTrigger.FOCUS_COMPLETE.defaultEnergy),
-                    Toast.LENGTH_LONG
-                ).show()
-            } else {
-                activeState = result.state
-                withContext(Dispatchers.IO) { stage5.saveActiveFocus(result.state) }
-                renderState(result.state)
+            try {
+                val now = System.currentTimeMillis()
+                val result = FocusEngine.tick(current, now)
+                if (result.justCompleted) {
+                    val fresh = withContext(Dispatchers.IO) { stage5.loadActiveFocus() }
+                    if (fresh != null && fresh.isActive) {
+                        withContext(Dispatchers.IO) { stage5.finishFocusSession(result.state, now) }
+                        Toast.makeText(
+                            this@MindstopFocusActivity,
+                            getString(R.string.mindstop_focus_completed_toast, RewardTrigger.FOCUS_COMPLETE.defaultEnergy),
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                    activeState = null
+                    renderState(null)
+                } else {
+                    activeState = result.state
+                    if (uiTickCounter % 15 == 0) {
+                        withContext(Dispatchers.IO) { stage5.saveActiveFocus(result.state) }
+                    }
+                    renderState(result.state)
+                }
+            } finally {
+                tickInFlight = false
             }
         }
     }

@@ -1885,6 +1885,11 @@
     <string name="mindstop_wizard_step_next_msg">%2$d left. Continue to %1$s now?</string>
     <string name="mindstop_wizard_continue_btn">Continue</string>
     <string name="mindstop_wizard_later_btn">Later</string>
+    <string name="mindstop_morning_ring_open_btn">Open dismiss screen</string>
+    <string name="mindstop_morning_ring_stop_quick_btn">Stop alarm</string>
+    <string name="mindstop_morning_overlay_ringing_title">Morning alarm is ringing</string>
+    <string name="mindstop_intention_overlay_fallback_title">Confirm your intention first</string>
+    <string name="mindstop_intention_overlay_fallback_btn">Confirm now</string>
     <plurals name="scheduled_notifications_ping_body">
         <item quantity="one">%d notification waited for this time.</item>
         <item quantity="other">%d notifications waited for this time.</item>

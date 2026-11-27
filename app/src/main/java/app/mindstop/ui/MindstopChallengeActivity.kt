@@ -264,7 +264,7 @@ class MindstopChallengeActivity : AppCompatActivity() {
                 launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 startActivity(launch)
             }
-            finish()
+            finishAndRemoveTask()
         }
     }
 
@@ -275,7 +275,7 @@ class MindstopChallengeActivity : AppCompatActivity() {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         startActivity(home)
-        finish()
+        finishAndRemoveTask()
     }
 
     private fun showKeyboard() {

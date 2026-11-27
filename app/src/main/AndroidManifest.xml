@@ -60,6 +60,7 @@
             android:excludeFromRecents="true"
             android:exported="false"
             android:launchMode="singleTop"
+            android:taskAffinity="app.mindstop.gate"
             android:theme="@style/Theme.Curbox" />
 
         <activity
@@ -67,6 +68,7 @@
             android:excludeFromRecents="true"
             android:exported="false"
             android:launchMode="singleTop"
+            android:taskAffinity="app.mindstop.gate"
             android:theme="@style/Theme.Curbox.TransparentDialog"
             android:windowSoftInputMode="adjustResize" />
 
@@ -87,6 +89,7 @@
             android:excludeFromRecents="true"
             android:exported="false"
             android:launchMode="singleTop"
+            android:taskAffinity="app.mindstop.gate"
             android:windowSoftInputMode="adjustResize" />
 
         <activity
@@ -110,6 +113,7 @@
             android:excludeFromRecents="true"
             android:exported="false"
             android:launchMode="singleTop"
+            android:taskAffinity="app.mindstop.gate"
             android:windowSoftInputMode="adjustResize" />
 
         <activity
@@ -130,7 +134,8 @@
 
         <activity
             android:name="app.mindstop.ui.MindstopMorningActivationActivity"
-            android:exported="false" />
+            android:exported="false"
+            android:launchMode="singleTop" />
 
         <activity
             android:name="app.mindstop.ui.MindstopAlarmRingActivity"
@@ -138,6 +143,7 @@
             android:exported="false"
             android:launchMode="singleTask"
             android:showWhenLocked="true"
+            android:taskAffinity="app.mindstop.alarm"
             android:turnScreenOn="true" />
 
         <activity

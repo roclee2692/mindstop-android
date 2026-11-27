@@ -17,13 +17,16 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.net.toUri
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import app.mindstop.core.MorningAlarm
 import app.mindstop.core.MorningJoyPreset
 import app.mindstop.core.MorningState
 import app.mindstop.core.WakeupConfirmMethod
 import app.mindstop.service.MindstopAlarmReceiver
 import app.mindstop.service.MindstopAlarmScheduler
+import app.mindstop.service.MindstopAlarmService
 import app.mindstop.service.MorningRepository
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
@@ -59,9 +62,7 @@ class MindstopMorningActivity : AppCompatActivity() {
         repo = MorningRepository(this)
 
         binding.morningExactFixBtn.setOnClickListener {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                startActivity(Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM, "package:$packageName".toUri()))
-            }
+            OemPermissionRouter.openExactAlarm(this)
         }
         binding.morningActiveCard.setOnClickListener {
             val sid = activeSessionId ?: return@setOnClickListener
@@ -74,14 +75,25 @@ class MindstopMorningActivity : AppCompatActivity() {
         binding.morningSyncSleepPlan.setOnClickListener { syncFromSleepPlan() }
 
         lifecycleScope.launch {
-            repo.observeAlarms().collectLatest { alarms ->
-                renderAlarms(alarms)
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                repo.observeAlarms().collectLatest { alarms ->
+                    renderAlarms(alarms)
+                }
             }
         }
     }
 
     override fun onResume() {
         super.onResume()
+        if (MindstopAlarmService.isRinging()) {
+            startActivity(
+                Intent(this, MindstopAlarmRingActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                    .putExtra(MindstopAlarmReceiver.EXTRA_ALARM_ID, MindstopAlarmService.activeAlarmId)
+                    .putExtra(MindstopAlarmReceiver.EXTRA_SESSION_ID, MindstopAlarmService.activeSessionId)
+            )
+            return
+        }
         val exactOk = MindstopAlarmScheduler.canScheduleExact(this)
         binding.morningExactWarnCard.visibility = if (exactOk) View.GONE else View.VISIBLE
         refreshActiveAndLinks()
@@ -269,7 +281,7 @@ class MindstopMorningActivity : AppCompatActivity() {
             .setTitle(if (existing == null) R.string.mindstop_morning_add_alarm else R.string.mindstop_morning_edit_btn)
             .setView(form)
             .setPositiveButton(R.string.mindstop_rule_save) { _, _ ->
-                val parts = timeInput.text?.toString()?.trim().orEmpty().split(':')
+                val parts = timeInput.text?.toString()?.trim().orEmpty().replace('：', ':').split(':')
                 val h = parts.getOrNull(0)?.toIntOrNull()
                 val m = parts.getOrNull(1)?.toIntOrNull()
                 if (parts.size != 2 || h == null || m == null || h !in 0..23 || m !in 0..59) {
@@ -300,6 +312,9 @@ class MindstopMorningActivity : AppCompatActivity() {
 
         if (existing != null) {
             builder.setNeutralButton(R.string.mindstop_rule_delete) { _, _ ->
+                if (MindstopAlarmService.activeAlarmId == existing.id) {
+                    MindstopAlarmService.stop(this@MindstopMorningActivity)
+                }
                 lifecycleScope.launch(Dispatchers.IO) {
                     MindstopAlarmScheduler.cancel(this@MindstopMorningActivity, existing.id)
                     repo.deleteAlarm(existing.id, System.currentTimeMillis())

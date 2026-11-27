@@ -411,8 +411,7 @@ class MindstopIntentionActivity : AppCompatActivity() {
                 }
                 repo.clearCalmWait()
             }
-            moveTaskToBack(true)
-            finish()
+            finishAndRemoveTask()
         }
     }
 
@@ -487,7 +486,7 @@ class MindstopIntentionActivity : AppCompatActivity() {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         startActivity(home)
-        finish()
+        finishAndRemoveTask()
     }
 
     private fun copyKeywords() {

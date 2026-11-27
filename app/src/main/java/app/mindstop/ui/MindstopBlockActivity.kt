@@ -23,6 +23,7 @@ import app.mindstop.service.MindstopEngine
 import app.mindstop.service.QuotaRepository
 import app.mindstop.service.RewardRepository
 import app.mindstop.service.Stage5Repository
+import com.google.android.material.color.MaterialColors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -69,6 +70,7 @@ class MindstopBlockActivity : AppCompatActivity() {
     private var sessionId: Long? = null
     private var config = ChallengeConfig()
     private var challengeRuleId: String? = null
+    private var busy = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -90,10 +92,12 @@ class MindstopBlockActivity : AppCompatActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        busy = false
     }
 
     override fun onResume() {
         super.onResume()
+        busy = false
         refresh()
     }
 
@@ -125,13 +129,21 @@ class MindstopBlockActivity : AppCompatActivity() {
 
     private suspend fun render(result: Verdict, now: Long) {
         binding.blockNote.visibility = View.GONE
+        if (bedtimeMode && bedtimeLowStim) {
+            binding.blockRoot.setBackgroundColor(0xFF101713.toInt())
+            binding.blockTitle.setTextColor(0xFFD6E4DB.toInt())
+            binding.blockAppName.setTextColor(0xFFA7BCB0.toInt())
+            binding.blockRuleDetail.setTextColor(0xFFA7BCB0.toInt())
+        } else {
+            val surface = MaterialColors.getColor(binding.blockRoot, com.google.android.material.R.attr.colorSurface)
+            val onSurface = MaterialColors.getColor(binding.blockRoot, com.google.android.material.R.attr.colorOnSurface)
+            val onSurfaceVariant = MaterialColors.getColor(binding.blockRoot, com.google.android.material.R.attr.colorOnSurfaceVariant)
+            binding.blockRoot.setBackgroundColor(surface)
+            binding.blockTitle.setTextColor(onSurface)
+            binding.blockAppName.setTextColor(onSurfaceVariant)
+            binding.blockRuleDetail.setTextColor(onSurfaceVariant)
+        }
         if (bedtimeMode) {
-            if (bedtimeLowStim) {
-                binding.blockRoot.setBackgroundColor(0xFF101713.toInt())
-                binding.blockTitle.setTextColor(0xFFD6E4DB.toInt())
-                binding.blockAppName.setTextColor(0xFFA7BCB0.toInt())
-                binding.blockRuleDetail.setTextColor(0xFFA7BCB0.toInt())
-            }
             binding.blockTitle.setText(R.string.mindstop_block_bedtime_title)
             binding.blockRuleDetail.text = bedtimeImpactText.ifBlank {
                 getString(R.string.mindstop_block_bedtime_detail, bedtimeEndText)
@@ -199,6 +211,8 @@ class MindstopBlockActivity : AppCompatActivity() {
     }
 
     private fun endUse() {
+        if (busy) return
+        busy = true
         val current = verdict
         lifecycleScope.launch {
             val outcome = withContext(Dispatchers.IO) {
@@ -256,7 +270,8 @@ class MindstopBlockActivity : AppCompatActivity() {
 
     private fun startCooldown() {
         val current = verdict ?: return
-        if (!current.cooldownHelps) return
+        if (!current.cooldownHelps || busy) return
+        busy = true
         lifecycleScope.launch {
             withContext(Dispatchers.IO) {
                 val now = repo.approxTrustedNow()
@@ -274,11 +289,13 @@ class MindstopBlockActivity : AppCompatActivity() {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         startActivity(home)
-        finish()
+        finishAndRemoveTask()
     }
 
     private fun emergencyUnlock() {
         val current = verdict ?: return
+        if (busy) return
+        busy = true
         lifecycleScope.launch {
             withContext(Dispatchers.IO) {
                 val now = repo.approxTrustedNow()
@@ -299,7 +316,7 @@ class MindstopBlockActivity : AppCompatActivity() {
                 launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 startActivity(launch)
             }
-            finish()
+            finishAndRemoveTask()
         }
     }
 
