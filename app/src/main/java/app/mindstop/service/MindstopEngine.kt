@@ -77,6 +77,7 @@ class MindstopEngine {
     private lateinit var repo: QuotaRepository
     private lateinit var rewards: RewardRepository
     private lateinit var stage5: Stage5Repository
+    private lateinit var morningRepo: MorningRepository
 
     @Volatile private var crashLogger: CrashLogger? = null
 
@@ -116,6 +117,7 @@ class MindstopEngine {
         this.repo = QuotaRepository(service)
         this.rewards = RewardRepository(service)
         this.stage5 = Stage5Repository(service)
+        this.morningRepo = MorningRepository(service)
         val powerManager = service.getSystemService(Context.POWER_SERVICE) as PowerManager
         screenOn = powerManager.isInteractive
         registerScreenReceiver()
@@ -537,6 +539,12 @@ class MindstopEngine {
         val nowElapsed = SystemClock.elapsedRealtime()
         val nowWall = trustedNow()
         rewards.settleDueRewards(nowWall)
+        morningRepo.deliverDueAfternoonBonusIfReady(nowWall)?.let { mins ->
+            showReminder(
+                service.getString(neth.iecal.curbox.R.string.mindstop_morning_bonus_afternoon_arrived, mins),
+                belowPill = false
+            )
+        }
         tickActiveFocus(nowWall, enteredPackage = null)
         if (packageName == null) {
             // Persist the trusted time floor so a reboot cannot move the clock behind it.

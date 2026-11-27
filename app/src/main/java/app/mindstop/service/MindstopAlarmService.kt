@@ -110,6 +110,7 @@ class MindstopAlarmService : Service() {
                 return START_NOT_STICKY
             }
             ACTION_DISMISS_FROM_NOTIFICATION -> {
+                val aid = intent.getLongExtra(MindstopAlarmReceiver.EXTRA_ALARM_ID, activeAlarmId)
                 val sid = intent.getLongExtra(MindstopAlarmReceiver.EXTRA_SESSION_ID, activeSessionId)
                 activeAlarmId = -1L
                 activeSessionId = -1L
@@ -121,7 +122,17 @@ class MindstopAlarmService : Service() {
                 if (sid > 0L) {
                     scope.launch {
                         try {
-                            MorningRepository(applicationContext).acknowledgeAlarm(sid, System.currentTimeMillis())
+                            val morningRepo = MorningRepository(applicationContext)
+                            morningRepo.acknowledgeAlarm(sid, System.currentTimeMillis())
+                            val alarm = if (aid > 0L) morningRepo.getAlarm(aid) else null
+                            MindstopAlarmScheduler.scheduleActivationCheckins(
+                                context = applicationContext,
+                                sessionId = sid,
+                                alarmId = aid.coerceAtLeast(0L),
+                                firstCheckMin = 5,
+                                finalCheckMin = 15,
+                                backupReminderEnabled = alarm?.backupReminderEnabled ?: true
+                            )
                         } catch (_: Exception) {
                         }
                         mainHandler.post { stopSelf() }

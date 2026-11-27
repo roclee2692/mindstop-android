@@ -32,28 +32,93 @@ class MindstopMorningTest {
     }
 
     @Test
-    fun dismissingAlarmEntersActivationNotCompletedAndMotionNeverAutoCompletes() {
+    fun strictSequentialThreeStageFlowAndAntiCheatGate() {
         val alarm = MorningAlarm(id = 10L, hour = 7, minute = 0)
         val t0 = 1_760_000_000_000L
         val ringing = MorningActivationEngine.onRingStarted(alarm, t0, t0)
         assertEquals(MorningState.RINGING, ringing.status)
 
-        val ack = MorningActivationEngine.onAlarmAcknowledged(ringing, t0 + 25_000L, rewardId = 5L)
-        assertEquals(MorningState.ACTIVATION, ack.status)
-        assertNotEquals(MorningState.COMPLETED, ack.status)
-        assertEquals(25, ack.responseDelaySec)
+        // Dismissing alarm enters STAGE1_WAKE, never COMPLETED
+        val stage1 = MorningActivationEngine.onAlarmAcknowledged(ringing, t0 + 25_000L, rewardId = 5L)
+        assertEquals(MorningState.STAGE1_WAKE, stage1.status)
+        assertNotEquals(MorningState.COMPLETED, stage1.status)
+        assertEquals(25, stage1.responseDelaySec)
+
+        // Cannot cheat by jumping straight to COMPLETED or STAGE2_PREP before 5 min elapsed
+        assertFalse(MorningActivationEngine.canEnterStage2(stage1, t0 + 25_000L + 299_000L))
+        assertEquals(MorningState.STAGE1_WAKE, MorningActivationEngine.enterStage2(stage1, t0 + 25_000L + 299_000L).status)
+        assertEquals(MorningState.STAGE1_WAKE, MorningActivationEngine.onActivationCompleted(stage1, t0 + 60_000L).status)
 
         // Auxiliary motion hint must NOT auto-complete wake-up
-        val withMotion = MorningActivationEngine.onMotionHint(ack, t0 + 120_000L)
+        val withMotion = MorningActivationEngine.onMotionHint(stage1, t0 + 120_000L)
         assertTrue(withMotion.motionHintSeen)
-        assertEquals(MorningState.ACTIVATION, withMotion.status)
+        assertEquals(MorningState.STAGE1_WAKE, withMotion.status)
 
-        val checked5m = MorningActivationEngine.onCheck5mConfirmed(withMotion, t0 + 300_000L)
-        assertTrue(checked5m.check5mConfirmed)
+        // At 5m00s, Stage 2 unlocks cleanly
+        val tStage2 = t0 + 25_000L + MorningActivationEngine.STAGE1_UNLOCK_MS
+        assertTrue(MorningActivationEngine.canEnterStage2(withMotion, tStage2))
+        val stage2 = MorningActivationEngine.enterStage2(withMotion, tStage2)
+        assertEquals(MorningState.STAGE2_PREP, stage2.status)
+        assertTrue(stage2.check5mConfirmed)
 
-        val done = MorningActivationEngine.onActivationCompleted(checked5m, t0 + 900_000L)
+        // Cannot skip Stage 3 directly from Stage 2
+        assertEquals(MorningState.STAGE2_PREP, MorningActivationEngine.onActivationCompleted(stage2, tStage2 + 60_000L).status)
+
+        // Enter Stage 3 after finishing wash-up & morning prep
+        val tStage3 = tStage2 + 20 * 60_000L
+        val stage3 = MorningActivationEngine.enterStage3(stage2, tStage3)
+        assertEquals(MorningState.STAGE3_REWARD, stage3.status)
+
+        // Complete all 3 stages
+        val tDone = tStage3 + 10 * 60_000L
+        val done = MorningActivationEngine.onActivationCompleted(stage3, tDone)
         assertEquals(MorningState.COMPLETED, done.status)
-        assertEquals(t0 + 900_000L, done.completedWall)
+        assertEquals(tDone, done.completedWall)
+    }
+
+    @Test
+    fun subsequentAlarmsAutoSkipOnceAwakeOrInStage2Or3() {
+        val tCompleted = 1_760_000_000_000L
+
+        // Within 3h after COMPLETED -> skip subsequent alarm
+        assertTrue(
+            MorningActivationEngine.shouldSkipSubsequentAlarm(
+                latestCompletedWall = tCompleted,
+                activeState = null,
+                nowWall = tCompleted + 15 * 60_000L
+            )
+        )
+        // After 3h window -> do NOT skip (e.g. afternoon nap alarm)
+        assertFalse(
+            MorningActivationEngine.shouldSkipSubsequentAlarm(
+                latestCompletedWall = tCompleted,
+                activeState = null,
+                nowWall = tCompleted + MorningActivationEngine.SKIP_REPEAT_ALARM_WINDOW_MS + 1_000L
+            )
+        )
+        // Already actively washing up (Stage 2) or enjoying reward (Stage 3) -> skip backup alarm
+        assertTrue(
+            MorningActivationEngine.shouldSkipSubsequentAlarm(
+                latestCompletedWall = null,
+                activeState = MorningState.STAGE2_PREP,
+                nowWall = tCompleted
+            )
+        )
+        assertTrue(
+            MorningActivationEngine.shouldSkipSubsequentAlarm(
+                latestCompletedWall = null,
+                activeState = MorningState.STAGE3_REWARD,
+                nowWall = tCompleted
+            )
+        )
+        // Still in Stage 1 (could drift back to bed!) -> do NOT skip backup alarm
+        assertFalse(
+            MorningActivationEngine.shouldSkipSubsequentAlarm(
+                latestCompletedWall = null,
+                activeState = MorningState.STAGE1_WAKE,
+                nowWall = tCompleted
+            )
+        )
     }
 
     @Test

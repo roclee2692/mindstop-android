@@ -104,10 +104,13 @@ class MindstopMorningActivity : AppCompatActivity() {
             val now = System.currentTimeMillis()
             val active = withContext(Dispatchers.IO) { repo.activeSession(now) }
             activeSessionId = active?.id
-            binding.morningActiveCard.visibility = if (active != null && active.status == MorningState.ACTIVATION) {
-                View.VISIBLE
-            } else {
-                View.GONE
+            val showResume = active != null && active.status.isInActivation
+            binding.morningActiveCard.visibility = if (showResume) View.VISIBLE else View.GONE
+            if (showResume && active != null) {
+                binding.morningActiveBannerText.text = getString(
+                    R.string.mindstop_morning_resume_stage,
+                    stateLabel(active.status)
+                )
             }
             val links = withContext(Dispatchers.IO) { repo.loadRecentLinks(7) }
             renderLinks(links)
@@ -254,6 +257,7 @@ class MindstopMorningActivity : AppCompatActivity() {
             MorningJoyPreset.AUDIOBOOK.code to getString(R.string.mindstop_morning_joy_audiobook),
             MorningJoyPreset.BREAKFAST.code to getString(R.string.mindstop_morning_joy_breakfast),
             MorningJoyPreset.SHORT_GAME.code to getString(R.string.mindstop_morning_joy_game),
+            MorningJoyPreset.MARKET.code to getString(R.string.mindstop_morning_joy_market),
             MorningJoyPreset.GROWTH_GARDEN.code to getString(R.string.mindstop_morning_joy_garden)
         )
         val joySpinner = Spinner(this).apply {
@@ -394,6 +398,9 @@ class MindstopMorningActivity : AppCompatActivity() {
     private fun stateLabel(state: MorningState): String = when (state) {
         MorningState.COMPLETED -> getString(R.string.mindstop_morning_state_completed)
         MorningState.RETURNED_TO_BED -> getString(R.string.mindstop_morning_state_returned)
+        MorningState.STAGE1_WAKE -> getString(R.string.mindstop_morning_state_stage1)
+        MorningState.STAGE2_PREP -> getString(R.string.mindstop_morning_state_stage2)
+        MorningState.STAGE3_REWARD -> getString(R.string.mindstop_morning_state_stage3)
         MorningState.ACTIVATION -> getString(R.string.mindstop_morning_state_activation)
         MorningState.UNVERIFIED -> getString(R.string.mindstop_morning_state_unverified)
         else -> getString(R.string.mindstop_morning_state_ringing)

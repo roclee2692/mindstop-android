@@ -251,8 +251,14 @@ interface MorningSessionDao {
     @Query("SELECT * FROM morning_sessions WHERE id = :id")
     suspend fun byId(id: Long): MorningSessionEntity?
 
-    @Query("SELECT * FROM morning_sessions WHERE status IN ('RINGING', 'ACKNOWLEDGED', 'ACTIVATION') ORDER BY id DESC LIMIT 1")
+    @Query("SELECT * FROM morning_sessions WHERE status IN ('RINGING', 'ACKNOWLEDGED', 'ACTIVATION', 'STAGE1_WAKE', 'STAGE2_PREP', 'STAGE3_REWARD') ORDER BY id DESC LIMIT 1")
     suspend fun activeSession(): MorningSessionEntity?
+
+    @Query("SELECT * FROM morning_sessions WHERE dayKey = :dayKey AND status = 'COMPLETED' ORDER BY completedWall DESC LIMIT 1")
+    suspend fun latestCompletedForDay(dayKey: String): MorningSessionEntity?
+
+    @Query("UPDATE morning_sessions SET status = 'UNVERIFIED', updatedWall = :nowWall WHERE status = 'RINGING' AND id != :excludeId AND ringStartedWall <= :staleBeforeWall")
+    suspend fun settleStaleRinging(excludeId: Long, staleBeforeWall: Long, nowWall: Long): Int
 
     @Query("SELECT * FROM morning_sessions ORDER BY ringStartedWall DESC LIMIT :limit")
     fun observeRecent(limit: Int): Flow<List<MorningSessionEntity>>

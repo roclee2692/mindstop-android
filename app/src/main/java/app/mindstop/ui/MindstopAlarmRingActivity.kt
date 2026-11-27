@@ -363,8 +363,8 @@ class MindstopAlarmRingActivity : AppCompatActivity(), SensorEventListener {
                 context = this@MindstopAlarmRingActivity,
                 sessionId = sid,
                 alarmId = alarm.id,
-                firstCheckMin = alarm.bodyWakeMinutes.coerceIn(1, 15),
-                finalCheckMin = alarm.totalActivationMinutes,
+                firstCheckMin = 5,
+                finalCheckMin = 15,
                 backupReminderEnabled = alarm.backupReminderEnabled
             )
             startActivity(

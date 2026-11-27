@@ -61,7 +61,13 @@ object MindstopAlarmScheduler {
         am.cancel(firePendingIntent(context, alarmId, isSnooze = true, scheduledWall = 0L))
     }
 
-    /** Schedules the gentle 5-minute and 15-minute post-alarm activation check-ins (v0.3 §12). */
+    /**
+     * Schedules Stage 1 guards after alarm dismiss:
+     * - At [firstCheckMin] (default 5m): gentle notification that Stage 2 ("Wash up & Prep") is unlocked.
+     * - At [finalCheckMin] (default 15m): if user STILL hasn't entered Stage 2, fires
+     *   [MindstopAlarmReceiver.ACTION_STAGE1_TIMEOUT_RING] (rings alarm again when [backupReminderEnabled]
+     *   is true, or posts a high-priority reminder otherwise).
+     */
     fun scheduleActivationCheckins(
         context: Context,
         sessionId: Long,
@@ -77,9 +83,25 @@ object MindstopAlarmScheduler {
 
         setReminderTrigger(am, t5, checkinPendingIntent(context, sessionId, alarmId, MindstopAlarmReceiver.ACTION_CHECK_5M))
         val finalAction = if (backupReminderEnabled) {
-            MindstopAlarmReceiver.ACTION_BACKUP_REMIND
+            MindstopAlarmReceiver.ACTION_STAGE1_TIMEOUT_RING
         } else {
-            MindstopAlarmReceiver.ACTION_CHECK_15M
+            MindstopAlarmReceiver.ACTION_BACKUP_REMIND
+        }
+        if (backupReminderEnabled && canScheduleExact(context)) {
+            try {
+                val showIntent = PendingIntent.getActivity(
+                    context,
+                    (sessionId.toInt() and 0x3FFF) + 45_000,
+                    Intent(context, MindstopMorningActivity::class.java),
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+                am.setAlarmClock(
+                    AlarmManager.AlarmClockInfo(t15, showIntent),
+                    checkinPendingIntent(context, sessionId, alarmId, finalAction)
+                )
+                return
+            } catch (_: SecurityException) {
+            }
         }
         setReminderTrigger(am, t15, checkinPendingIntent(context, sessionId, alarmId, finalAction))
     }
@@ -89,6 +111,7 @@ object MindstopAlarmScheduler {
         am.cancel(checkinPendingIntent(context, sessionId, 0L, MindstopAlarmReceiver.ACTION_CHECK_5M))
         am.cancel(checkinPendingIntent(context, sessionId, 0L, MindstopAlarmReceiver.ACTION_CHECK_15M))
         am.cancel(checkinPendingIntent(context, sessionId, 0L, MindstopAlarmReceiver.ACTION_BACKUP_REMIND))
+        am.cancel(checkinPendingIntent(context, sessionId, 0L, MindstopAlarmReceiver.ACTION_STAGE1_TIMEOUT_RING))
     }
 
     fun rescheduleAllAsync(
@@ -167,9 +190,10 @@ object MindstopAlarmScheduler {
         val salt = when (actionName) {
             MindstopAlarmReceiver.ACTION_CHECK_5M -> 100_001
             MindstopAlarmReceiver.ACTION_CHECK_15M -> 100_002
+            MindstopAlarmReceiver.ACTION_STAGE1_TIMEOUT_RING -> 100_004
             else -> 100_003
         }
-        val reqCode = ((sessionId.toInt() and 0x3FFF) * 4) + salt
+        val reqCode = ((sessionId.toInt() and 0x3FFF) * 8) + salt
         val intent = Intent(context, MindstopAlarmReceiver::class.java).apply {
             action = actionName
             putExtra(MindstopAlarmReceiver.EXTRA_SESSION_ID, sessionId)

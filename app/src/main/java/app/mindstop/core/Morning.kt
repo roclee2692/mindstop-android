@@ -6,17 +6,29 @@ import java.util.Calendar
  * Pure Kotlin state machine & scheduler math for Module 2: Morning Activation (v0.3 SPEC §9–§14).
  *
  * Alarm architecture inspired by Purgator/Upupup (GPL-3.0) and FossifyOrg/Clock (GPL-3.0).
- * State flow:
- *   SCHEDULED -> RINGING -> ACKNOWLEDGED -> ACTIVATION -> COMPLETED | RETURNED_TO_BED | UNVERIFIED
+ * Strict sequential 3-stage state flow:
+ *   SCHEDULED -> RINGING -> STAGE1_WAKE (15m window, 5m unlock gate)
+ *     -> STAGE2_PREP (30m wash/prep) -> STAGE3_REWARD (morning joy + optional bonus)
+ *     -> COMPLETED | RETURNED_TO_BED | UNVERIFIED
  */
 enum class MorningState(val code: String) {
     SCHEDULED("SCHEDULED"),
     RINGING("RINGING"),
     ACKNOWLEDGED("ACKNOWLEDGED"),
+    /** Legacy v0.3.0-rc state kept for backward compatibility with existing DB rows. */
     ACTIVATION("ACTIVATION"),
+    STAGE1_WAKE("STAGE1_WAKE"),
+    STAGE2_PREP("STAGE2_PREP"),
+    STAGE3_REWARD("STAGE3_REWARD"),
     COMPLETED("COMPLETED"),
     RETURNED_TO_BED("RETURNED_TO_BED"),
     UNVERIFIED("UNVERIFIED");
+
+    val isInActivation: Boolean
+        get() = this == ACTIVATION || this == STAGE1_WAKE || this == STAGE2_PREP || this == STAGE3_REWARD
+
+    val isStage1: Boolean
+        get() = this == STAGE1_WAKE || this == ACTIVATION
 
     val isTerminal: Boolean
         get() = this == COMPLETED || this == RETURNED_TO_BED || this == UNVERIFIED
@@ -51,6 +63,7 @@ enum class MorningJoyPreset(val code: String) {
     AUDIOBOOK("audiobook"),
     BREAKFAST("breakfast"),
     SHORT_GAME("short_game"),
+    MARKET("market"),
     GROWTH_GARDEN("growth_garden"),
     CUSTOM("custom");
 
@@ -168,17 +181,43 @@ object MorningAlarmPlanner {
 }
 
 /**
- * Pure Morning Activation state machine (v0.3 SPEC §11–§13).
- * Closing an alarm NEVER marks wake-up as completed; it enters ACKNOWLEDGED -> ACTIVATION.
- * Extreme sleep deprivation (< 5 hours planned sleep opportunity) does NOT earn early-wake rewards.
+ * Pure sequential 3-stage Morning Activation state machine (v0.3 SPEC §11–§13).
+ *
+ * 1. Dismissing an alarm NEVER marks wake-up as completed; it enters [MorningState.STAGE1_WAKE].
+ * 2. Stage 1 runs a 15-minute out-of-bed window with a 5-minute anti-cheat gate before Stage 2
+ *    unlocks. Failing to enter Stage 2 within 15 minutes triggers a backup alarm ring.
+ * 3. Stage 2 runs a 30-minute wash-up & morning prep countdown.
+ * 4. Stage 3 unlocks the morning expectation / joy countdown and an optional +15 min quota reward
+ *    (which defaults to afternoon-only after 12:00 so mornings stay calm).
+ * 5. Once Stage 2/3 is active or COMPLETED within the same morning window (3h), subsequent backup
+ *    alarms are skipped automatically while preserving repeating schedules for the next day.
+ * 6. Extreme sleep deprivation (< 5 hours planned sleep opportunity) never earns early-wake rewards.
  */
 object MorningActivationEngine {
 
     /** Minimum planned sleep opportunity (300m = 5h) required to qualify for morning wake reward. */
     const val MIN_HEALTHY_SLEEP_OPPORTUNITY_MIN = 300
 
-    /** Timeout after which an unconfirmed activation settles honestly as UNVERIFIED (default 45m). */
-    const val UNVERIFIED_TIMEOUT_MS = 45 * 60_000L
+    /** Anti-cheat lock before Stage 2 button unlocks (default 5 min). */
+    const val STAGE1_UNLOCK_MS = 5 * 60_000L
+
+    /** Out-of-bed window before backup alarm rings again if Stage 2 was not started (default 15 min). */
+    const val STAGE1_WINDOW_MS = 15 * 60_000L
+
+    /** Stage 2 wash-up and morning preparation duration (default 30 min). */
+    const val STAGE2_DURATION_MS = 30 * 60_000L
+
+    /** Default Stage 3 morning joy duration (10 min). */
+    const val STAGE3_DEFAULT_MS = 10 * 60_000L
+
+    /** Optional bonus daily entertainment quota minutes offered in Stage 3. */
+    const val BONUS_QUOTA_MINUTES = 15
+
+    /** Same-morning window (3h) in which subsequent scheduled alarms auto-skip once awake. */
+    const val SKIP_REPEAT_ALARM_WINDOW_MS = 3 * 60 * 60_000L
+
+    /** Timeout after which an unfinished activation settles honestly as UNVERIFIED (default 120m). */
+    const val UNVERIFIED_TIMEOUT_MS = 120 * 60_000L
 
     fun onRingStarted(alarm: MorningAlarm, scheduledWall: Long, nowWall: Long): MorningSessionRecord =
         MorningSessionRecord(
@@ -192,8 +231,8 @@ object MorningActivationEngine {
         )
 
     /**
-     * User dismissed the alarm: transitions RINGING -> ACTIVATION (via ACKNOWLEDGED) and computes
-     * response delay. Never marks wake-up as COMPLETED yet.
+     * User dismissed the alarm: transitions RINGING -> STAGE1_WAKE and computes response delay.
+     * Never marks wake-up as COMPLETED yet.
      */
     fun onAlarmAcknowledged(
         session: MorningSessionRecord,
@@ -203,26 +242,78 @@ object MorningActivationEngine {
         val delaySec = ((nowWall - session.ringStartedWall).coerceAtLeast(0L) / 1_000L).toInt()
         return session.copy(
             acknowledgedWall = nowWall,
-            status = MorningState.ACTIVATION,
-            responseDelaySec = delaySec,
+            status = MorningState.STAGE1_WAKE,
+            responseDelaySec = if (session.acknowledgedWall == null) delaySec else session.responseDelaySec,
             rewardId = rewardId ?: session.rewardId,
             updatedWall = nowWall
         )
     }
 
+    fun stage1UnlockRemainingMs(
+        session: MorningSessionRecord,
+        nowWall: Long,
+        unlockMs: Long = STAGE1_UNLOCK_MS
+    ): Long {
+        if (!session.status.isStage1) return 0L
+        val start = session.acknowledgedWall ?: session.ringStartedWall
+        return (start + unlockMs - nowWall).coerceAtLeast(0L)
+    }
+
+    fun stage1WindowRemainingMs(
+        session: MorningSessionRecord,
+        nowWall: Long,
+        windowMs: Long = STAGE1_WINDOW_MS
+    ): Long {
+        if (!session.status.isStage1) return 0L
+        val start = session.acknowledgedWall ?: session.ringStartedWall
+        return (start + windowMs - nowWall).coerceAtLeast(0L)
+    }
+
+    fun canEnterStage2(
+        session: MorningSessionRecord,
+        nowWall: Long,
+        unlockMs: Long = STAGE1_UNLOCK_MS
+    ): Boolean = session.status.isStage1 && stage1UnlockRemainingMs(session, nowWall, unlockMs) == 0L
+
+    /** Strict sequential transition: STAGE1_WAKE -> STAGE2_PREP once the 5-minute gate passes. */
+    fun enterStage2(
+        session: MorningSessionRecord,
+        nowWall: Long,
+        unlockMs: Long = STAGE1_UNLOCK_MS
+    ): MorningSessionRecord {
+        if (!canEnterStage2(session, nowWall, unlockMs)) return session
+        return session.copy(
+            status = MorningState.STAGE2_PREP,
+            check5mConfirmed = true,
+            updatedWall = nowWall
+        )
+    }
+
+    /** Strict sequential transition: STAGE2_PREP -> STAGE3_REWARD when wash-up & prep finish. */
+    fun enterStage3(session: MorningSessionRecord, nowWall: Long): MorningSessionRecord {
+        if (session.status != MorningState.STAGE2_PREP) return session
+        return session.copy(
+            status = MorningState.STAGE3_REWARD,
+            updatedWall = nowWall
+        )
+    }
+
     fun onCheck5mConfirmed(session: MorningSessionRecord, nowWall: Long): MorningSessionRecord {
-        if (session.status != MorningState.ACTIVATION) return session
+        if (!session.status.isInActivation) return session
         return session.copy(check5mConfirmed = true, updatedWall = nowWall)
     }
 
     fun onMotionHint(session: MorningSessionRecord, nowWall: Long): MorningSessionRecord {
-        if (session.status != MorningState.ACTIVATION) return session
+        if (!session.status.isInActivation) return session
         // Motion is only an auxiliary signal; it never auto-completes wake-up!
         return session.copy(motionHintSeen = true, updatedWall = nowWall)
     }
 
+    /** Strict sequential completion: only completes from STAGE3_REWARD (or legacy ACTIVATION). */
     fun onActivationCompleted(session: MorningSessionRecord, nowWall: Long): MorningSessionRecord {
-        if (session.status.isTerminal) return session
+        if (session.status != MorningState.STAGE3_REWARD && session.status != MorningState.ACTIVATION) {
+            return session
+        }
         return session.copy(
             status = MorningState.COMPLETED,
             completedWall = nowWall,
@@ -243,13 +334,32 @@ object MorningActivationEngine {
         nowWall: Long,
         timeoutMs: Long = UNVERIFIED_TIMEOUT_MS
     ): MorningSessionRecord {
-        if (session.status != MorningState.ACTIVATION) return session
+        if (!session.status.isInActivation) return session
         val base = session.acknowledgedWall ?: session.ringStartedWall
         return if (nowWall - base >= timeoutMs) {
             session.copy(status = MorningState.UNVERIFIED, updatedWall = nowWall)
         } else {
             session
         }
+    }
+
+    /**
+     * Suppresses redundant subsequent morning alarms when the user has already completed Morning
+     * Activation recently (default within 3 hours) or has already progressed into Stage 2 / Stage 3.
+     */
+    fun shouldSkipSubsequentAlarm(
+        latestCompletedWall: Long?,
+        activeState: MorningState?,
+        nowWall: Long,
+        windowMs: Long = SKIP_REPEAT_ALARM_WINDOW_MS
+    ): Boolean {
+        if (activeState == MorningState.STAGE2_PREP || activeState == MorningState.STAGE3_REWARD) {
+            return true
+        }
+        if (latestCompletedWall != null && nowWall >= latestCompletedWall && (nowWall - latestCompletedWall) <= windowMs) {
+            return true
+        }
+        return false
     }
 
     /** Guardrail (§13): never reward extreme early wake-up under sleep deprivation (< 5h planned opportunity). */
