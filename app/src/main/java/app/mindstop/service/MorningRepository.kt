@@ -1,6 +1,7 @@
 package app.mindstop.service
 
 import android.content.Context
+import androidx.room.withTransaction
 import app.mindstop.core.BedtimeEngine
 import app.mindstop.core.BodyWakeActivity
 import app.mindstop.core.DayKeys
@@ -16,6 +17,7 @@ import app.mindstop.core.MorningState
 import app.mindstop.core.MorningStatsAggregator
 import app.mindstop.core.MorningStatsSummary
 import app.mindstop.core.MorningV2Settings
+import app.mindstop.core.PendingMorningBonus
 import app.mindstop.core.QuotaGrant
 import app.mindstop.core.RuleEngine
 import app.mindstop.core.WakeCheckSubState
@@ -29,14 +31,12 @@ import app.mindstop.data.MorningSessionEntity
 import java.util.Calendar
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 
 /**
  * Local persistence, atomic state transitions & telemetry for Module 2: Morning Activation V2.
  *
- * Uses a process-wide [stateMutex] (inspired by WakeNudge `WakeCheckController`, Apache-2.0) so
- * simultaneous user confirmations and AlarmManager timeout deliveries never race or interleave.
+ * Token guards follow WakeNudge `WakeCheckController` (Apache-2.0). Room transactions also
+ * serialize the accessibility process and commit session, meta and reward writes together.
  */
 class MorningRepository(private val context: Context) {
 
@@ -63,15 +63,7 @@ class MorningRepository(private val context: Context) {
         val changed: Boolean = true
     )
 
-    data class WakeCheckPromptOutcome(
-        val session: MorningSessionRecord?,
-        val meta: MorningRuntimeMeta,
-        val openedPrompt: Boolean,
-        val autoPassedBySteps: Boolean
-    )
-
     companion object {
-        private val stateMutex = Mutex()
         private const val KEY_V2_SETTINGS = "morning_v2_settings"
         private const val KEY_STAGE_META_PREFIX = "morning_stage_meta_"
         private const val KEY_PENDING_AFTERNOON_BONUS = "morning_pending_afternoon_bonus"
@@ -158,7 +150,7 @@ class MorningRepository(private val context: Context) {
     fun observeRecentSessions(limit: Int = 10): Flow<List<MorningSessionRecord>> =
         db.morningSessionDao().observeRecent(limit).map { rows -> rows.map { it.toDomain() } }
 
-    suspend fun activeSession(nowWall: Long): MorningSessionRecord? = stateMutex.withLock {
+    suspend fun activeSession(nowWall: Long): MorningSessionRecord? = db.withTransaction {
         activeSessionLocked(nowWall)
     }
 
@@ -169,6 +161,13 @@ class MorningRepository(private val context: Context) {
             nowWall = nowWall
         )
         val raw = db.morningSessionDao().activeSession()?.toDomain() ?: return null
+        if (raw.status == MorningState.STAGE3_REWARD) {
+            val meta = loadRuntimeMeta(raw.id)
+            if (MorningActivationEngine.instantRewardTimerWall(meta, nowWall) == nowWall) {
+                completeActivation(raw.id, nowWall, meta.stageToken)
+                return null
+            }
+        }
         val settled = MorningActivationEngine.settleUnverifiedIfExpired(raw, nowWall)
         if (settled.status != raw.status) {
             db.morningSessionDao().upsert(settled.toEntity())
@@ -179,25 +178,43 @@ class MorningRepository(private val context: Context) {
         return settled
     }
 
+    // Keep the timer snapshot and its installation ordered with competing database transitions.
+    suspend fun restoreActiveTimers(now: Long) = db.withTransaction {
+        val active = activeSessionLocked(now)
+        if (active != null && active.status.isInActivation) {
+            val meta = loadRuntimeMeta(active.id)
+            val settings = loadSettings()
+            MindstopAlarmScheduler.scheduleSessionTimers(context, active, meta, settings, now)
+            if (active.status == MorningState.STAGE2_PREP && meta.wakeCheckState == WakeCheckSubState.PROMPTED &&
+                meta.wakeCheckDeadlineWall > now
+            ) {
+                MindstopAlarmScheduler.postSilentWakeCheckNotification(
+                    context, active.id, meta.wakeCheckToken,
+                    ((meta.wakeCheckDeadlineWall - now + 59_999L) / 60_000L).toInt()
+                )
+            }
+        }
+    }
+
+    // Cleanup is optional after commit. Read the current stage again while holding the database
+    // transaction so a late caller cannot cancel a newer stage's alarm or notification.
+    private suspend fun pruneOldTimers(snapshot: SessionSnapshot?) {
+        if (snapshot == null || !snapshot.changed) return
+        db.withTransaction {
+            val id = snapshot.session.id
+            val current = getSession(id) ?: return@withTransaction
+            MindstopAlarmScheduler.cancelObsoleteTimers(context, id, current.status, loadRuntimeMeta(id))
+        }
+    }
+
     suspend fun getSession(id: Long): MorningSessionRecord? =
-        db.morningSessionDao().byId(id)?.toDomain()
+        db.morningSessionDao().latestById(id)?.toDomain()
 
     suspend fun loadRuntimeMeta(sessionId: Long): MorningRuntimeMeta =
         MorningRuntimeMeta.decode(db.metaDao().get("$KEY_STAGE_META_PREFIX$sessionId"))
 
     private suspend fun saveRuntimeMeta(sessionId: Long, meta: MorningRuntimeMeta) {
         db.metaDao().put(MetaEntity("$KEY_STAGE_META_PREFIX$sessionId", meta.encode()))
-    }
-
-    suspend fun shouldSkipAlarmBecauseAlreadyAwake(nowWall: Long): Boolean = stateMutex.withLock {
-        val dayKey = DayKeys.dayKey(nowWall)
-        val latestCompleted = db.morningSessionDao().latestCompletedForDay(dayKey)?.completedWall
-        val active = activeSessionLocked(nowWall)
-        MorningActivationEngine.shouldSkipSubsequentAlarm(
-            latestCompletedWall = latestCompleted,
-            activeState = active?.status,
-            nowWall = nowWall
-        )
     }
 
     suspend fun logSkippedAlarm(alarmId: Long, nowWall: Long) {
@@ -210,7 +227,8 @@ class MorningRepository(private val context: Context) {
      * while essential daily tools stay unrestricted.
      */
     suspend fun isMorningPrepBlockingActive(nowWall: Long): Boolean {
-        val active = activeSession(nowWall) ?: return false
+        val active = db.morningSessionDao().activeSession()?.toDomain() ?: return false
+        if (MorningActivationEngine.settleUnverifiedIfExpired(active, nowWall).status.isTerminal) return false
         return active.status.isStage1 || active.status == MorningState.STAGE2_PREP
     }
 
@@ -218,8 +236,23 @@ class MorningRepository(private val context: Context) {
      * Starts Stage 1 immediately when the alarm fires (ringStartedWall = stage1StartWall),
      * ensuring the 5m unlock gate & 15m planned wake window run from alarm trigger time.
      */
-    suspend fun startRinging(alarm: MorningAlarm, scheduledWall: Long, nowWall: Long): SessionSnapshot =
-        stateMutex.withLock {
+    suspend fun startRinging(alarm: MorningAlarm, scheduledWall: Long, nowWall: Long, isSnooze: Boolean): SessionSnapshot? =
+        db.withTransaction {
+            if (!isSnooze && alarm.repeatDaysMask == MorningAlarm.ONCE_MASK) {
+                val stored = db.morningAlarmDao().byId(alarm.id) ?: return@withTransaction null
+                if (!stored.enabled) return@withTransaction null
+                db.morningAlarmDao().upsert(stored.copy(enabled = false, updatedWall = nowWall))
+            }
+            val active = activeSessionLocked(nowWall)
+            if (!isSnooze) {
+                val completed = db.morningSessionDao().latestCompletedForDay(DayKeys.dayKey(nowWall))
+                if (MorningActivationEngine.shouldSkipSubsequentAlarm(completed?.completedWall, active?.status, nowWall)) {
+                    return@withTransaction null
+                }
+            }
+            if (active != null && active.status.isInActivation) {
+                return@withTransaction SessionSnapshot(active, loadRuntimeMeta(active.id), changed = false)
+            }
             db.morningSessionDao().settleStaleRinging(excludeId = -1L, staleBeforeWall = nowWall, nowWall = nowWall)
             val session = MorningActivationEngine.onRingStarted(alarm, scheduledWall, nowWall)
             val id = db.morningSessionDao().upsert(session.toEntity())
@@ -229,6 +262,7 @@ class MorningRepository(private val context: Context) {
             db.eventDao().insert(
                 EventEntity(wall = nowWall, type = "alarm_ringing", detail = "alarm=${alarm.id} session=$id token=${meta.stageToken}")
             )
+            MindstopAlarmScheduler.scheduleSessionTimers(context, saved, meta, loadSettings(), nowWall)
             SessionSnapshot(saved, meta, changed = true)
         }
 
@@ -236,8 +270,9 @@ class MorningRepository(private val context: Context) {
      * Temporarily mutes / dismisses the ringing screen without marking wake-up complete.
      * Preserves original Stage 1 start wall & ring count, and plants the pending Ginkgo reward once.
      */
-    suspend fun acknowledgeAlarm(sessionId: Long, nowWall: Long): SessionSnapshot? = stateMutex.withLock {
-        val current = db.morningSessionDao().byId(sessionId)?.toDomain() ?: return@withLock null
+    suspend fun acknowledgeAlarm(sessionId: Long, nowWall: Long): SessionSnapshot? = db.withTransaction {
+        val current = db.morningSessionDao().latestById(sessionId)?.toDomain() ?: return@withTransaction null
+        if (!current.status.isStage1 && current.status != MorningState.RINGING && current.status != MorningState.ACKNOWLEDGED) return@withTransaction null
         val pendingRewardId = if (current.rewardId != null) {
             current.rewardId
         } else {
@@ -262,6 +297,9 @@ class MorningRepository(private val context: Context) {
             existingMeta
         }
         saveRuntimeMeta(sessionId, normalizedMeta)
+        if (!current.status.isStage1) {
+            MindstopAlarmScheduler.scheduleSessionTimers(context, updated, normalizedMeta, loadSettings(), nowWall)
+        }
         db.eventDao().insert(
             EventEntity(
                 wall = nowWall,
@@ -273,12 +311,12 @@ class MorningRepository(private val context: Context) {
     }
 
     /** Atomically handles a 2nd ring (+5m) or overtime repeat ring (+15m/interval) in Stage 1. */
-    suspend fun onStage1RepeatRing(sessionId: Long, expectedStageToken: Long, nowWall: Long): SessionSnapshot? =
-        stateMutex.withLock {
-            val current = db.morningSessionDao().byId(sessionId)?.toDomain() ?: return@withLock null
+    suspend fun onStage1RepeatRing(sessionId: Long, expectedStageToken: Long, nowWall: Long, secondRingOnly: Boolean = false): SessionSnapshot? =
+        db.withTransaction {
+            val current = db.morningSessionDao().latestById(sessionId)?.toDomain() ?: return@withTransaction null
             val meta = loadRuntimeMeta(sessionId)
-            val result = MorningActivationEngine.onStage1RepeatRing(current, meta, expectedStageToken, nowWall)
-            if (!result.changed) return@withLock SessionSnapshot(current, meta, changed = false)
+            val result = MorningActivationEngine.onStage1RepeatRing(current, meta, expectedStageToken, nowWall, secondRingOnly)
+            if (!result.changed) return@withTransaction SessionSnapshot(current, meta, changed = false)
             db.morningSessionDao().upsert(result.session.toEntity())
             saveRuntimeMeta(sessionId, result.meta)
             db.eventDao().insert(
@@ -288,17 +326,22 @@ class MorningRepository(private val context: Context) {
                     detail = "session=$sessionId ringCount=${result.meta.ringCount} token=${result.meta.stageToken}"
                 )
             )
+            if (!secondRingOnly) {
+                MindstopAlarmScheduler.scheduleStage1NextOvertimeRing(
+                    context, sessionId, current.alarmId, result.meta.stageToken, loadSettings().stage1RepeatMs, nowWall
+                )
+            }
             SessionSnapshot(result.session, result.meta, changed = true)
         }
 
     /** Atomically enters intentional Extended Sleep (only allowed starting from 2nd ring). */
     suspend fun enterExtendedSleep(sessionId: Long, requestedMinutes: Int, nowWall: Long): SessionSnapshot? =
-        stateMutex.withLock {
-            val current = db.morningSessionDao().byId(sessionId)?.toDomain() ?: return@withLock null
+        db.withTransaction {
+            val current = db.morningSessionDao().latestById(sessionId)?.toDomain() ?: return@withTransaction null
             val meta = loadRuntimeMeta(sessionId)
             val settings = loadSettings()
             val result = MorningActivationEngine.enterExtendedSleep(current, meta, requestedMinutes, settings, nowWall)
-            if (!result.changed) return@withLock SessionSnapshot(current, meta, changed = false)
+            if (!result.changed) return@withTransaction SessionSnapshot(current, meta, changed = false)
             db.morningSessionDao().upsert(result.session.toEntity())
             saveRuntimeMeta(sessionId, result.meta)
             db.eventDao().insert(
@@ -308,16 +351,17 @@ class MorningRepository(private val context: Context) {
                     detail = "session=$sessionId count=${result.meta.extendedSleepCount} resume=${result.meta.extendedSleepResumeWall} token=${result.meta.stageToken}"
                 )
             )
+            MindstopAlarmScheduler.scheduleSessionTimers(context, result.session, result.meta, settings, nowWall)
             SessionSnapshot(result.session, result.meta, changed = true)
-        }
+        }.also { pruneOldTimers(it) }
 
     /** Atomically resumes Stage 1 when an intentional Extended Sleep window ends. */
     suspend fun resumeFromExtendedSleep(sessionId: Long, expectedStageToken: Long, nowWall: Long): SessionSnapshot? =
-        stateMutex.withLock {
-            val current = db.morningSessionDao().byId(sessionId)?.toDomain() ?: return@withLock null
+        db.withTransaction {
+            val current = db.morningSessionDao().latestById(sessionId)?.toDomain() ?: return@withTransaction null
             val meta = loadRuntimeMeta(sessionId)
             val result = MorningActivationEngine.resumeFromExtendedSleep(current, meta, expectedStageToken, nowWall)
-            if (!result.changed) return@withLock SessionSnapshot(current, meta, changed = false)
+            if (!result.changed) return@withTransaction SessionSnapshot(current, meta, changed = false)
             db.morningSessionDao().upsert(result.session.toEntity())
             saveRuntimeMeta(sessionId, result.meta)
             db.eventDao().insert(
@@ -327,8 +371,9 @@ class MorningRepository(private val context: Context) {
                     detail = "session=$sessionId token=${result.meta.stageToken}"
                 )
             )
+            MindstopAlarmScheduler.scheduleSessionTimers(context, result.session, result.meta, loadSettings(), nowWall)
             SessionSnapshot(result.session, result.meta, changed = true)
-        }
+        }.also { pruneOldTimers(it) }
 
     /** Atomically enters Stage 2 and captures optional hardware step counter baseline. */
     suspend fun enterStage2(sessionId: Long, nowWall: Long): SessionSnapshot? {
@@ -338,11 +383,11 @@ class MorningRepository(private val context: Context) {
         } else {
             -1f
         }
-        return stateMutex.withLock {
-            val current = db.morningSessionDao().byId(sessionId)?.toDomain() ?: return@withLock null
+        return db.withTransaction {
+            val current = db.morningSessionDao().latestById(sessionId)?.toDomain() ?: return@withTransaction null
             val meta = loadRuntimeMeta(sessionId)
             val result = MorningActivationEngine.enterStage2WithMeta(current, meta, settings, nowWall, baseline)
-            if (!result.changed) return@withLock SessionSnapshot(current, meta, changed = false)
+            if (!result.changed) return@withTransaction SessionSnapshot(current, meta, changed = false)
             db.morningSessionDao().upsert(result.session.toEntity())
             saveRuntimeMeta(sessionId, result.meta)
             db.eventDao().insert(
@@ -352,8 +397,9 @@ class MorningRepository(private val context: Context) {
                     detail = "session=$sessionId token=${result.meta.stageToken} checkToken=${result.meta.wakeCheckToken} stepBase=$baseline"
                 )
             )
+            MindstopAlarmScheduler.scheduleSessionTimers(context, result.session, result.meta, settings, nowWall)
             SessionSnapshot(result.session, result.meta, changed = true)
-        }
+        }.also { pruneOldTimers(it) }
     }
 
     /** Opens the silent wake-check window inside Stage 2 (or auto-passes via optional 30-step counter). */
@@ -361,18 +407,21 @@ class MorningRepository(private val context: Context) {
         sessionId: Long,
         expectedCheckToken: Long,
         nowWall: Long
-    ): WakeCheckPromptOutcome {
+    ) {
         val settings = loadSettings()
-        val currentSteps = if (settings.stepProofEnabled) HardwareStepReader.readTotalSteps(context) else null
-        return stateMutex.withLock {
-            val current = db.morningSessionDao().byId(sessionId)?.toDomain()
-                ?: return@withLock WakeCheckPromptOutcome(null, MorningRuntimeMeta(), openedPrompt = false, autoPassedBySteps = false)
+        val beforeRead = loadRuntimeMeta(sessionId)
+        val sample = settings.stepProofEnabled && beforeRead.stepBaseline >= 0f &&
+            beforeRead.wakeCheckToken == expectedCheckToken && beforeRead.wakeCheckState == WakeCheckSubState.WAITING
+        val currentSteps = if (sample) HardwareStepReader.readTotalSteps(context) else null
+        return db.withTransaction {
+            val current = db.morningSessionDao().latestById(sessionId)?.toDomain()
+                ?: return@withTransaction
             val meta = loadRuntimeMeta(sessionId)
             val result = MorningActivationEngine.triggerSilentWakeCheckPrompt(
                 current, meta, expectedCheckToken, settings, nowWall, currentSteps
             )
             if (!result.changed) {
-                return@withLock WakeCheckPromptOutcome(current, meta, openedPrompt = false, autoPassedBySteps = false)
+                return@withTransaction
             }
             db.morningSessionDao().upsert(result.session.toEntity())
             saveRuntimeMeta(sessionId, result.meta)
@@ -384,62 +433,68 @@ class MorningRepository(private val context: Context) {
                     detail = "session=$sessionId checkToken=$expectedCheckToken"
                 )
             )
-            WakeCheckPromptOutcome(
-                session = result.session,
-                meta = result.meta,
-                openedPrompt = !autoPassed,
-                autoPassedBySteps = autoPassed
-            )
+            if (!autoPassed) {
+                MindstopAlarmScheduler.scheduleWakeCheckDeadline(context, sessionId, current.alarmId,
+                    result.meta.stageToken, result.meta.wakeCheckToken, result.meta.wakeCheckDeadlineWall)
+                MindstopAlarmScheduler.postSilentWakeCheckNotification(context, sessionId, result.meta.wakeCheckToken, settings.wakeCheckWindowMin)
+            }
         }
     }
 
     /** Attempts silent step-counter auto-confirmation when Stage 2 is viewed or polled. */
-    suspend fun tryAutoConfirmWakeCheckBySteps(sessionId: Long, nowWall: Long): SessionSnapshot? {
+    suspend fun tryAutoConfirmWakeCheckBySteps(sessionId: Long, expectedCheckToken: Long): SessionSnapshot? {
         val settings = loadSettings()
         if (!settings.stepProofEnabled) return null
         val currentSteps = HardwareStepReader.readTotalSteps(context) ?: return null
-        return stateMutex.withLock {
-            val current = db.morningSessionDao().byId(sessionId)?.toDomain() ?: return@withLock null
+        return db.withTransaction {
+            val current = db.morningSessionDao().latestById(sessionId)?.toDomain() ?: return@withTransaction null
             val meta = loadRuntimeMeta(sessionId)
             if (current.status != MorningState.STAGE2_PREP || meta.wakeCheckState == WakeCheckSubState.CONFIRMED) {
-                return@withLock SessionSnapshot(current, meta, changed = false)
+                return@withTransaction SessionSnapshot(current, meta, changed = false)
             }
             if (!MorningActivationEngine.stepsSatisfyWakeCheck(meta.stepBaseline, currentSteps, settings.stepProofThreshold)) {
-                return@withLock SessionSnapshot(current, meta, changed = false)
+                return@withTransaction SessionSnapshot(current, meta, changed = false)
             }
-            val result = MorningActivationEngine.confirmSilentWakeCheck(current, meta, meta.wakeCheckToken, nowWall)
-            if (!result.changed) return@withLock SessionSnapshot(current, meta, changed = false)
+            val nowWall = System.currentTimeMillis()
+            val result = MorningActivationEngine.confirmSilentWakeCheck(current, meta, expectedCheckToken, nowWall)
+            if (!result.changed) return@withTransaction SessionSnapshot(current, meta, changed = false)
             db.morningSessionDao().upsert(result.session.toEntity())
             saveRuntimeMeta(sessionId, result.meta)
             db.eventDao().insert(
                 EventEntity(wall = nowWall, type = "morning_wake_check_auto_steps", detail = "session=$sessionId")
             )
             SessionSnapshot(result.session, result.meta, changed = true)
-        }
+        }.also { pruneOldTimers(it) }
     }
 
     /** Atomically confirms the Stage 2 Silent Wake Check (via notification action or in-app button). */
     suspend fun confirmSilentWakeCheck(sessionId: Long, expectedCheckToken: Long?, nowWall: Long): SessionSnapshot? =
-        stateMutex.withLock {
-            val current = db.morningSessionDao().byId(sessionId)?.toDomain() ?: return@withLock null
+        db.withTransaction {
+            val current = db.morningSessionDao().latestById(sessionId)?.toDomain() ?: return@withTransaction null
             val meta = loadRuntimeMeta(sessionId)
             val result = MorningActivationEngine.confirmSilentWakeCheck(current, meta, expectedCheckToken, nowWall)
-            if (!result.changed) return@withLock SessionSnapshot(current, meta, changed = false)
+            if (!result.changed) return@withTransaction SessionSnapshot(current, meta, changed = false)
             db.morningSessionDao().upsert(result.session.toEntity())
             saveRuntimeMeta(sessionId, result.meta)
             db.eventDao().insert(
                 EventEntity(wall = nowWall, type = "morning_wake_check_confirmed", detail = "session=$sessionId checkToken=${meta.wakeCheckToken}")
             )
             SessionSnapshot(result.session, result.meta, changed = true)
-        }
+        }.also { pruneOldTimers(it) }
 
     /** Atomically rolls Stage 2 back to Stage 1 when the silent wake-check window expires unanswered. */
     suspend fun onSilentWakeCheckTimeout(sessionId: Long, expectedCheckToken: Long, nowWall: Long): SessionSnapshot? =
-        stateMutex.withLock {
-            val current = db.morningSessionDao().byId(sessionId)?.toDomain() ?: return@withLock null
+        db.withTransaction {
+            val current = db.morningSessionDao().latestById(sessionId)?.toDomain() ?: return@withTransaction null
             val meta = loadRuntimeMeta(sessionId)
+            if (current.status == MorningState.STAGE2_PREP && meta.wakeCheckToken == expectedCheckToken &&
+                meta.wakeCheckState == WakeCheckSubState.PROMPTED && nowWall < meta.wakeCheckDeadlineWall
+            ) {
+                MindstopAlarmScheduler.scheduleWakeCheckDeadline(context, sessionId, current.alarmId,
+                    meta.stageToken, meta.wakeCheckToken, meta.wakeCheckDeadlineWall)
+            }
             val result = MorningActivationEngine.onSilentWakeCheckTimeout(current, meta, expectedCheckToken, nowWall)
-            if (!result.changed) return@withLock SessionSnapshot(current, meta, changed = false)
+            if (!result.changed) return@withTransaction SessionSnapshot(current, meta, changed = false)
             db.morningSessionDao().upsert(result.session.toEntity())
             saveRuntimeMeta(sessionId, result.meta)
             db.eventDao().insert(
@@ -449,16 +504,17 @@ class MorningRepository(private val context: Context) {
                     detail = "session=$sessionId timeouts=${result.meta.wakeCheckTimeouts} newToken=${result.meta.stageToken}"
                 )
             )
+            MindstopAlarmScheduler.scheduleSessionTimers(context, result.session, result.meta, loadSettings(), nowWall)
             SessionSnapshot(result.session, result.meta, changed = true)
-        }
+        }.also { pruneOldTimers(it) }
 
     /** Atomically advances Stage 2 -> Stage 3 (or directly to COMPLETED when Stage 3 is disabled). */
-    suspend fun enterStage3(sessionId: Long, nowWall: Long): Pair<SessionSnapshot?, Boolean> = stateMutex.withLock {
-        val current = db.morningSessionDao().byId(sessionId)?.toDomain() ?: return@withLock null to false
+    suspend fun enterStage3(sessionId: Long, nowWall: Long): Pair<SessionSnapshot?, Boolean> = db.withTransaction {
+        val current = db.morningSessionDao().latestById(sessionId)?.toDomain() ?: return@withTransaction null to false
         val meta = loadRuntimeMeta(sessionId)
         val settings = loadSettings()
         val result = MorningActivationEngine.enterStage3WithMeta(current, meta, settings, nowWall)
-        if (!result.changed) return@withLock SessionSnapshot(current, meta, changed = false) to false
+        if (!result.changed) return@withTransaction SessionSnapshot(current, meta, changed = false) to false
         db.morningSessionDao().upsert(result.session.toEntity())
         saveRuntimeMeta(sessionId, result.meta)
         var confirmedReward = false
@@ -475,24 +531,24 @@ class MorningRepository(private val context: Context) {
             )
         )
         SessionSnapshot(result.session, result.meta, changed = true) to confirmedReward
-    }
+    }.also { pruneOldTimers(it.first) }
 
-    suspend fun updateSelectedJoy(sessionId: Long, joyCode: String) = stateMutex.withLock {
+    suspend fun updateSelectedJoy(sessionId: Long, joyCode: String) = db.withTransaction {
+        val current = db.morningSessionDao().latestById(sessionId)?.toDomain() ?: return@withTransaction
         val meta = loadRuntimeMeta(sessionId)
         saveRuntimeMeta(sessionId, meta.copy(selectedJoy = joyCode))
-        val current = db.morningSessionDao().byId(sessionId)?.toDomain() ?: return@withLock
         if (current.joyActivity != joyCode) {
             db.morningSessionDao().upsert(current.copy(joyActivity = joyCode).toEntity())
         }
     }
 
     /** Stage 3 Choice A: Start bounded instant joy countdown (mutually exclusive with B & C). */
-    suspend fun chooseInstantReward(sessionId: Long, nowWall: Long): SessionSnapshot? = stateMutex.withLock {
-        val current = db.morningSessionDao().byId(sessionId)?.toDomain() ?: return@withLock null
+    suspend fun chooseInstantReward(sessionId: Long, nowWall: Long): SessionSnapshot? = db.withTransaction {
+        val current = db.morningSessionDao().latestById(sessionId)?.toDomain() ?: return@withTransaction null
         val meta = loadRuntimeMeta(sessionId)
         val settings = loadSettings()
         val result = MorningActivationEngine.chooseInstantReward(current, meta, settings, nowWall)
-        if (!result.changed) return@withLock SessionSnapshot(current, meta, changed = false)
+        if (!result.changed) return@withTransaction SessionSnapshot(current, meta, changed = false)
         db.morningSessionDao().upsert(result.session.toEntity())
         saveRuntimeMeta(sessionId, result.meta)
         db.eventDao().insert(
@@ -502,6 +558,7 @@ class MorningRepository(private val context: Context) {
                 detail = "session=$sessionId min=${settings.stage3InstantMin} end=${result.meta.instantRewardEndWall}"
             )
         )
+        MindstopAlarmScheduler.scheduleSessionTimers(context, result.session, result.meta, settings, nowWall)
         SessionSnapshot(result.session, result.meta, changed = true)
     }
 
@@ -512,14 +569,14 @@ class MorningRepository(private val context: Context) {
     suspend fun chooseDelayedRewardAndComplete(
         sessionId: Long,
         nowWall: Long
-    ): Triple<SessionSnapshot?, Boolean, BonusClaimResult> = stateMutex.withLock {
-        val current = db.morningSessionDao().byId(sessionId)?.toDomain()
-            ?: return@withLock Triple(null, false, BonusClaimResult.ALREADY_CLAIMED)
+    ): Triple<SessionSnapshot?, Boolean, BonusClaimResult> = db.withTransaction {
+        val current = db.morningSessionDao().latestById(sessionId)?.toDomain()
+            ?: return@withTransaction Triple(null, false, BonusClaimResult.ALREADY_CLAIMED)
         val meta = loadRuntimeMeta(sessionId)
         val settings = loadSettings()
         val result = MorningActivationEngine.chooseDelayedRewardAndComplete(current, meta, nowWall)
         if (!result.changed) {
-            return@withLock Triple(SessionSnapshot(current, meta, changed = false), false, BonusClaimResult.ALREADY_CLAIMED)
+            return@withTransaction Triple(SessionSnapshot(current, meta, changed = false), false, BonusClaimResult.ALREADY_CLAIMED)
         }
         val bonusResult = issueDayIdempotentBonusLocked(
             dayKey = DayKeys.dayKey(nowWall),
@@ -548,11 +605,11 @@ class MorningRepository(private val context: Context) {
 
     /** Stage 3 Choice C: Decline reward and finish Morning Activation cleanly. */
     suspend fun chooseSkipRewardAndComplete(sessionId: Long, nowWall: Long): Pair<SessionSnapshot?, Boolean> =
-        stateMutex.withLock {
-            val current = db.morningSessionDao().byId(sessionId)?.toDomain() ?: return@withLock null to false
+        db.withTransaction {
+            val current = db.morningSessionDao().latestById(sessionId)?.toDomain() ?: return@withTransaction null to false
             val meta = loadRuntimeMeta(sessionId)
             val result = MorningActivationEngine.chooseSkipRewardAndComplete(current, meta, nowWall)
-            if (!result.changed) return@withLock SessionSnapshot(current, meta, changed = false) to false
+            if (!result.changed) return@withTransaction SessionSnapshot(current, meta, changed = false) to false
             db.morningSessionDao().upsert(result.session.toEntity())
             saveRuntimeMeta(sessionId, result.meta)
             db.morningSessionDao().settleStaleRinging(excludeId = sessionId, staleBeforeWall = nowWall, nowWall = nowWall)
@@ -565,12 +622,15 @@ class MorningRepository(private val context: Context) {
         }
 
     /** Finishes Choice A instant reward (on timer expiry or user tap) and confirms morning completion. */
-    suspend fun completeActivation(sessionId: Long, nowWall: Long): Pair<MorningSessionRecord?, Boolean> =
-        stateMutex.withLock {
-            val current = db.morningSessionDao().byId(sessionId)?.toDomain() ?: return@withLock null to false
-            val updated = MorningActivationEngine.onActivationCompleted(current, nowWall)
-            if (updated.status != MorningState.COMPLETED) return@withLock current to false
+    suspend fun completeActivation(sessionId: Long, nowWall: Long, expectedStageToken: Long? = null): Pair<MorningSessionRecord?, Boolean> =
+        db.withTransaction {
+            val current = db.morningSessionDao().latestById(sessionId)?.toDomain() ?: return@withTransaction null to false
             val meta = loadRuntimeMeta(sessionId)
+            if (current.status != MorningState.STAGE3_REWARD || meta.rewardChoice != MorningRewardChoice.INSTANT ||
+                (expectedStageToken != null && (meta.stageToken != expectedStageToken ||
+                    MorningActivationEngine.instantRewardTimerWall(meta, nowWall) != nowWall))
+            ) return@withTransaction null to false
+            val updated = MorningActivationEngine.onActivationCompleted(current, nowWall)
             val nextMeta = meta.copy(stageToken = meta.stageToken + 1L)
             db.morningSessionDao().upsert(updated.toEntity())
             saveRuntimeMeta(sessionId, nextMeta)
@@ -588,8 +648,9 @@ class MorningRepository(private val context: Context) {
         sessionId: Long,
         returnedToBed: Boolean,
         nowWall: Long
-    ): MorningSessionRecord? = stateMutex.withLock {
-        val current = db.morningSessionDao().byId(sessionId)?.toDomain() ?: return@withLock null
+    ): MorningSessionRecord? = db.withTransaction {
+        val current = db.morningSessionDao().latestById(sessionId)?.toDomain() ?: return@withTransaction null
+        if (current.status.isTerminal) return@withTransaction null
         val updated = if (returnedToBed) {
             MorningActivationEngine.onReturnedToBed(current, nowWall)
         } else {
@@ -609,9 +670,9 @@ class MorningRepository(private val context: Context) {
     suspend fun reportReturnedToBed(sessionId: Long, nowWall: Long): MorningSessionRecord? =
         reportExitNotCompleted(sessionId, returnedToBed = true, nowWall = nowWall)
 
-    suspend fun markMotionHint(sessionId: Long, nowWall: Long) = stateMutex.withLock {
-        val current = db.morningSessionDao().byId(sessionId)?.toDomain() ?: return@withLock
-        if (current.motionHintSeen) return@withLock
+    suspend fun markMotionHint(sessionId: Long, nowWall: Long) = db.withTransaction {
+        val current = db.morningSessionDao().latestById(sessionId)?.toDomain() ?: return@withTransaction
+        if (current.motionHintSeen) return@withTransaction
         val updated = MorningActivationEngine.onMotionHint(current, nowWall)
         db.morningSessionDao().upsert(updated.toEntity())
     }
@@ -639,6 +700,7 @@ class MorningRepository(private val context: Context) {
             db.eventDao().insert(
                 EventEntity(wall = nowWall, type = "morning_bonus_scheduled_delayed", detail = "min=$bonusMinutes unlock=$unlockWall")
             )
+            MindstopAlarmScheduler.scheduleAfternoonBonus(context, unlockWall)
             BonusClaimResult.SCHEDULED_AFTERNOON
         }
     }
@@ -647,19 +709,18 @@ class MorningRepository(private val context: Context) {
      * Called periodically by MindstopEngine.onTick(): credits today's delayed morning bonus quota
      * once local time passes the user's configured morning restriction end time.
      */
-    suspend fun deliverDueAfternoonBonusIfReady(nowWall: Long): Int? = stateMutex.withLock {
-        val raw = db.metaDao().get(KEY_PENDING_AFTERNOON_BONUS)?.takeIf { it.isNotBlank() } ?: return@withLock null
-        val parts = raw.split('|')
-        if (parts.size < 4) return@withLock null
-        val dayKey = parts[0]
-        val unlockWall = parts[1].toLongOrNull() ?: return@withLock null
-        val minutes = parts[2].toIntOrNull() ?: return@withLock null
-        val delivered = parts[3] == "1"
-        val today = DayKeys.dayKey(nowWall)
-        if (delivered || dayKey != today || nowWall < unlockWall) return@withLock null
-        db.metaDao().put(MetaEntity(KEY_PENDING_AFTERNOON_BONUS, "$dayKey|$unlockWall|$minutes|1"))
-        val count = creditDailyBonus(dayKey, minutes, "morning_bonus_afternoon", nowWall)
-        if (count > 0) minutes else null
+    suspend fun restorePendingBonus(nowWall: Long) {
+        val bonus = PendingMorningBonus.forToday(db.metaDao().get(KEY_PENDING_AFTERNOON_BONUS), nowWall) ?: return
+        MindstopAlarmScheduler.scheduleAfternoonBonus(context, maxOf(nowWall, bonus.unlockWall))
+    }
+
+    suspend fun deliverDueAfternoonBonusIfReady(nowWall: Long): Int? = db.withTransaction {
+        val bonus = PendingMorningBonus.forToday(db.metaDao().get(KEY_PENDING_AFTERNOON_BONUS), nowWall)
+            ?: return@withTransaction null
+        if (nowWall < bonus.unlockWall) return@withTransaction null
+        if (creditDailyBonus(bonus.dayKey, bonus.minutes, "morning_bonus_afternoon", nowWall) == 0) return@withTransaction null
+        db.metaDao().put(MetaEntity(KEY_PENDING_AFTERNOON_BONUS, "${bonus.dayKey}|${bonus.unlockWall}|${bonus.minutes}|1"))
+        bonus.minutes
     }
 
     private suspend fun creditDailyBonus(dayKey: String, minutes: Int, source: String, nowWall: Long): Int {
@@ -682,7 +743,7 @@ class MorningRepository(private val context: Context) {
 
     // Local Morning Behavior Statistics (7 / 14 / 30 days)
 
-    suspend fun saveWakefulnessRating(sessionId: Long, rating: Int, nowWall: Long) = stateMutex.withLock {
+    suspend fun saveWakefulnessRating(sessionId: Long, rating: Int, nowWall: Long) = db.withTransaction {
         val clamped = rating.coerceIn(1, 5)
         val meta = loadRuntimeMeta(sessionId)
         saveRuntimeMeta(sessionId, meta.copy(wakefulnessRating = clamped))
@@ -695,7 +756,7 @@ class MorningRepository(private val context: Context) {
         db.eventDao().insert(EventEntity(wall = nowWall, type = "morning_wakefulness_rated", detail = "session=$sessionId rating=$clamped"))
     }
 
-    suspend fun loadStatsSummary(daysWindow: Int, nowWall: Long): MorningStatsSummary = stateMutex.withLock {
+    suspend fun loadStatsSummary(daysWindow: Int, nowWall: Long): MorningStatsSummary = db.withTransaction {
         val cal = Calendar.getInstance().apply {
             timeInMillis = nowWall
             add(Calendar.DAY_OF_MONTH, -(daysWindow - 1).coerceAtLeast(0))

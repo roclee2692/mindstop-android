@@ -1,6 +1,7 @@
 package app.mindstop.service
 
 import android.app.AlarmManager
+import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
@@ -8,6 +9,8 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.util.Log
+import androidx.core.app.NotificationCompat
+import app.mindstop.core.MorningActivationEngine
 import app.mindstop.core.MorningAlarm
 import app.mindstop.core.MorningAlarmPlanner
 import app.mindstop.core.MorningRewardChoice
@@ -16,10 +19,12 @@ import app.mindstop.core.MorningSessionRecord
 import app.mindstop.core.MorningState
 import app.mindstop.core.MorningV2Settings
 import app.mindstop.core.WakeCheckSubState
+import app.mindstop.ui.MindstopMorningActivationActivity
 import app.mindstop.ui.MindstopMorningActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import neth.iecal.curbox.R
 
 /**
  * Exact alarm & stage-timer scheduler for Module 2: Morning Activation V2.
@@ -34,6 +39,7 @@ import kotlinx.coroutines.launch
  */
 object MindstopAlarmScheduler {
 
+    private const val SILENT_CHECK_CHANNEL_ID = "mindstop_morning_silent_check"
     private const val TAG = "MindstopAlarmScheduler"
 
     fun canScheduleExact(context: Context): Boolean {
@@ -72,7 +78,8 @@ object MindstopAlarmScheduler {
         am.cancel(firePendingIntent(context, alarmId, isSnooze = true, scheduledWall = 0L))
     }
 
-    // Stage-scoped exact timers (all tagged with stageToken / wakeCheckToken for stale-event safety)
+    // Arm the next stage before its Room transaction commits. Leave the previous stage's
+    // operations valid if the transaction rolls back. After commit their tokens are stale.
 
     fun scheduleStage1Timers(
         context: Context,
@@ -81,14 +88,14 @@ object MindstopAlarmScheduler {
         stageToken: Long,
         stage1StartWall: Long,
         settings: MorningV2Settings,
-        nowWall: Long = System.currentTimeMillis()
+        nowWall: Long = System.currentTimeMillis(),
+        reminderDelivered: Boolean = false
     ) {
-        cancelAllStageTimers(context, sessionId)
         val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
 
         // At +5m (stage1UnlockMs): unlocks "I am awake" button & triggers 2nd ring (unlocking extended sleep).
-        val tUnlock = stage1StartWall + settings.stage1UnlockMs
-        if (tUnlock > nowWall + 1_000L) {
+        val (tUnlock, nextTimeoutAt) = MorningActivationEngine.stage1RingTimes(stage1StartWall, settings, nowWall, reminderDelivered)
+        if (tUnlock != null) {
             setAlarmClockWithFallback(
                 context,
                 am,
@@ -98,12 +105,6 @@ object MindstopAlarmScheduler {
         }
 
         // At +15m (stage1WindowMs) or next overtime interval: triggers overtime reminder ring.
-        val tWindow = stage1StartWall + settings.stage1WindowMs
-        val nextTimeoutAt = if (tWindow > nowWall + 1_000L) {
-            tWindow
-        } else {
-            nowWall + settings.stage1RepeatMs
-        }
         setAlarmClockWithFallback(
             context,
             am,
@@ -137,7 +138,6 @@ object MindstopAlarmScheduler {
         stageToken: Long,
         resumeAtWall: Long
     ) {
-        cancelAllStageTimers(context, sessionId)
         val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         setAlarmClockWithFallback(
             context,
@@ -160,7 +160,6 @@ object MindstopAlarmScheduler {
         settings: MorningV2Settings,
         nowWall: Long = System.currentTimeMillis()
     ) {
-        cancelAllStageTimers(context, sessionId)
         val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
 
         // Silent wake check sub-state timers
@@ -208,11 +207,64 @@ object MindstopAlarmScheduler {
         )
     }
 
-    fun cancelWakeCheckTimers(context: Context, sessionId: Long) {
-        val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        am.cancel(stagePendingIntent(context, MindstopAlarmReceiver.ACTION_WAKE_CHECK_PROMPT, sessionId, 0L, 0L, 0L))
-        am.cancel(stagePendingIntent(context, MindstopAlarmReceiver.ACTION_WAKE_CHECK_DEADLINE, sessionId, 0L, 0L, 0L))
-        cancelSilentWakeCheckNotification(context)
+    fun postSilentWakeCheckNotification(context: Context, sessionId: Long, checkToken: Long, windowMin: Int) {
+        val nm = context.getSystemService(NotificationManager::class.java)
+        val channel = NotificationChannel(
+            SILENT_CHECK_CHANNEL_ID,
+            context.getString(R.string.mindstop_morning_silent_check_channel),
+            NotificationManager.IMPORTANCE_DEFAULT
+        ).apply {
+            setSound(null, null)
+            enableVibration(false)
+        }
+        nm.createNotificationChannel(channel)
+
+        val openIntent = Intent(context, MindstopMorningActivationActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            putExtra(MindstopAlarmReceiver.EXTRA_SESSION_ID, sessionId)
+        }
+        val openPi = PendingIntent.getActivity(
+            context,
+            (sessionId.toInt() and 0x3FFF) + 52_000,
+            openIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val confirmIntent = Intent(context, MindstopAlarmReceiver::class.java).apply {
+            action = MindstopAlarmReceiver.ACTION_WAKE_CHECK_CONFIRM
+            data = Uri.parse("mindstop://morning/wakecheck_confirm/$sessionId/$checkToken")
+            putExtra(MindstopAlarmReceiver.EXTRA_SESSION_ID, sessionId)
+            putExtra(MindstopAlarmReceiver.EXTRA_WAKE_CHECK_TOKEN, checkToken)
+        }
+        val confirmPi = PendingIntent.getBroadcast(
+            context,
+            0,
+            confirmIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val notification = NotificationCompat.Builder(context, SILENT_CHECK_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_mindstop_hourglass)
+            .setContentTitle(context.getString(R.string.mindstop_morning_wakecheck_notif_title))
+            .setContentText(context.getString(R.string.mindstop_morning_wakecheck_notif_body, windowMin))
+            .setOngoing(true)
+            .setSilent(true)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setContentIntent(openPi)
+            .addAction(0, context.getString(R.string.mindstop_morning_wakecheck_confirm_btn), confirmPi)
+            .build()
+        try {
+            nm.notify(sessionId.toString(), MindstopAlarmReceiver.WAKE_CHECK_NOTIFY_ID, notification)
+        } catch (e: SecurityException) {
+            Log.w(TAG, "Wake check notification denied; in-app confirmation remains available", e)
+        }
+    }
+
+    fun scheduleAfternoonBonus(context: Context, unlockWall: Long) {
+        val intent = Intent(context, MindstopAlarmReceiver::class.java)
+            .setAction(MindstopAlarmReceiver.ACTION_AFTERNOON_BONUS)
+        val pi = PendingIntent.getBroadcast(context, 0, intent, PendingIntent.FLAG_IMMUTABLE)
+        setExactWithFallback(context.getSystemService(AlarmManager::class.java), unlockWall, pi)
     }
 
     fun scheduleStage3End(
@@ -222,7 +274,6 @@ object MindstopAlarmScheduler {
         stageToken: Long,
         endWall: Long
     ) {
-        cancelAllStageTimers(context, sessionId)
         val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         setExactWithFallback(
             am,
@@ -231,34 +282,49 @@ object MindstopAlarmScheduler {
         )
     }
 
-    /** Cancels EVERY pending timer & silent notification belonging to [sessionId]. */
-    fun cancelAllStageTimers(context: Context, sessionId: Long) {
-        if (sessionId <= 0L) return
-        val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        val actions = listOf(
-            MindstopAlarmReceiver.ACTION_CHECK_5M,
-            MindstopAlarmReceiver.ACTION_CHECK_15M,
-            MindstopAlarmReceiver.ACTION_BACKUP_REMIND,
-            MindstopAlarmReceiver.ACTION_STAGE1_SECOND_RING,
-            MindstopAlarmReceiver.ACTION_STAGE1_TIMEOUT_RING,
-            MindstopAlarmReceiver.ACTION_EXTENDED_SLEEP_RESUME,
-            MindstopAlarmReceiver.ACTION_WAKE_CHECK_PROMPT,
-            MindstopAlarmReceiver.ACTION_WAKE_CHECK_DEADLINE,
-            MindstopAlarmReceiver.ACTION_STAGE2_TIMEOUT,
-            MindstopAlarmReceiver.ACTION_STAGE3_END
-        )
-        for (action in actions) {
-            am.cancel(stagePendingIntent(context, action, sessionId, 0L, 0L, 0L))
-        }
-        cancelSilentWakeCheckNotification(context)
+    private val stageActions = listOf(
+        MindstopAlarmReceiver.ACTION_CHECK_5M, MindstopAlarmReceiver.ACTION_CHECK_15M,
+        MindstopAlarmReceiver.ACTION_BACKUP_REMIND, MindstopAlarmReceiver.ACTION_STAGE1_SECOND_RING,
+        MindstopAlarmReceiver.ACTION_STAGE1_TIMEOUT_RING, MindstopAlarmReceiver.ACTION_EXTENDED_SLEEP_RESUME,
+        MindstopAlarmReceiver.ACTION_WAKE_CHECK_PROMPT, MindstopAlarmReceiver.ACTION_WAKE_CHECK_DEADLINE,
+        MindstopAlarmReceiver.ACTION_STAGE2_TIMEOUT, MindstopAlarmReceiver.ACTION_STAGE3_END
+    )
+
+    internal fun keepStageTimer(action: String, state: MorningState?, meta: MorningRuntimeMeta?): Boolean = when (action) {
+        MindstopAlarmReceiver.ACTION_STAGE1_SECOND_RING -> state?.isStage1 == true && meta?.stage1ReminderDelivered == false
+        MindstopAlarmReceiver.ACTION_STAGE1_TIMEOUT_RING -> state?.isStage1 == true
+        MindstopAlarmReceiver.ACTION_EXTENDED_SLEEP_RESUME -> state == MorningState.EXTENDED_SLEEP
+        MindstopAlarmReceiver.ACTION_STAGE2_TIMEOUT -> state == MorningState.STAGE2_PREP
+        MindstopAlarmReceiver.ACTION_WAKE_CHECK_PROMPT -> state == MorningState.STAGE2_PREP && meta?.wakeCheckState == WakeCheckSubState.WAITING
+        MindstopAlarmReceiver.ACTION_WAKE_CHECK_DEADLINE -> state == MorningState.STAGE2_PREP && meta?.wakeCheckState == WakeCheckSubState.PROMPTED
+        MindstopAlarmReceiver.ACTION_STAGE3_END -> state == MorningState.STAGE3_REWARD && meta?.rewardChoice == MorningRewardChoice.INSTANT
+        else -> false
     }
+
+    internal fun cancelObsoleteTimers(context: Context, sessionId: Long, state: MorningState?, meta: MorningRuntimeMeta?) {
+        if (sessionId <= 0L) return
+        val am = context.getSystemService(AlarmManager::class.java)
+        for (action in stageActions) {
+            if (keepStageTimer(action, state, meta)) continue
+            val existing = PendingIntent.getBroadcast(context, 0, stageIntent(context, action, sessionId),
+                PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE)
+            if (existing != null) am.cancel(existing)
+        }
+        if (!keepStageTimer(MindstopAlarmReceiver.ACTION_WAKE_CHECK_DEADLINE, state, meta)) {
+            cancelSilentWakeCheckNotification(context, sessionId)
+        }
+    }
+
+    fun cancelAllStageTimers(context: Context, sessionId: Long) =
+        cancelObsoleteTimers(context, sessionId, null, null)
 
     fun cancelActivationCheckins(context: Context, sessionId: Long) = cancelAllStageTimers(context, sessionId)
 
-    fun cancelSilentWakeCheckNotification(context: Context) {
+    internal fun cancelSilentWakeCheckNotification(context: Context, sessionId: Long) {
         try {
             val nm = context.getSystemService(NotificationManager::class.java)
-            nm.cancel(MindstopAlarmReceiver.WAKE_CHECK_NOTIFY_ID)
+            nm.cancel(sessionId.toString(), MindstopAlarmReceiver.WAKE_CHECK_NOTIFY_ID)
+            nm.cancel(MindstopAlarmReceiver.WAKE_CHECK_NOTIFY_ID) // Untagged notification from the previous build.
         } catch (_: Exception) {
         }
     }
@@ -279,12 +345,8 @@ object MindstopAlarmScheduler {
                 for (alarm in repo.loadAlarms()) {
                     schedule(appCtx, alarm, now)
                 }
-                val active = repo.activeSession(now)
-                if (active != null && active.status.isInActivation) {
-                    val meta = repo.loadRuntimeMeta(active.id)
-                    val settings = repo.loadSettings()
-                    restoreActiveSessionTimers(appCtx, active, meta, settings, now)
-                }
+                repo.restorePendingBonus(now)
+                repo.restoreActiveTimers(now)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to reschedule Mindstop alarms & active morning stage", e)
             } finally {
@@ -296,7 +358,7 @@ object MindstopAlarmScheduler {
         }
     }
 
-    fun restoreActiveSessionTimers(
+    fun scheduleSessionTimers(
         context: Context,
         session: MorningSessionRecord,
         meta: MorningRuntimeMeta,
@@ -306,7 +368,7 @@ object MindstopAlarmScheduler {
         when (session.status) {
             MorningState.STAGE1_WAKE, MorningState.ACTIVATION -> {
                 val start = meta.stage1StartWall.takeIf { it > 0L } ?: session.ringStartedWall
-                scheduleStage1Timers(context, session.id, session.alarmId, meta.stageToken, start, settings, nowWall)
+                scheduleStage1Timers(context, session.id, session.alarmId, meta.stageToken, start, settings, nowWall, meta.stage1ReminderDelivered)
             }
             MorningState.EXTENDED_SLEEP -> {
                 val resumeAt = meta.extendedSleepResumeWall.coerceAtLeast(nowWall + 2_000L)
@@ -329,8 +391,8 @@ object MindstopAlarmScheduler {
                 )
             }
             MorningState.STAGE3_REWARD -> {
-                if (meta.rewardChoice == MorningRewardChoice.INSTANT && meta.instantRewardEndWall > nowWall + 1_000L) {
-                    scheduleStage3End(context, session.id, session.alarmId, meta.stageToken, meta.instantRewardEndWall)
+                MorningActivationEngine.instantRewardTimerWall(meta, nowWall)?.let { end ->
+                    scheduleStage3End(context, session.id, session.alarmId, meta.stageToken, end)
                 }
             }
             else -> Unit
@@ -395,6 +457,12 @@ object MindstopAlarmScheduler {
         )
     }
 
+    private fun stageIntent(context: Context, actionName: String, sessionId: Long) =
+        Intent(context, MindstopAlarmReceiver::class.java).apply {
+            action = actionName
+            data = Uri.parse("mindstop://morning/stage/$actionName/$sessionId")
+        }
+
     private fun stagePendingIntent(
         context: Context,
         actionName: String,
@@ -403,9 +471,7 @@ object MindstopAlarmScheduler {
         stageToken: Long,
         wakeCheckToken: Long
     ): PendingIntent {
-        val intent = Intent(context, MindstopAlarmReceiver::class.java).apply {
-            action = actionName
-            data = Uri.parse("mindstop://morning/stage/$actionName/$sessionId")
+        val intent = stageIntent(context, actionName, sessionId).apply {
             putExtra(MindstopAlarmReceiver.EXTRA_SESSION_ID, sessionId)
             putExtra(MindstopAlarmReceiver.EXTRA_ALARM_ID, alarmId)
             putExtra(MindstopAlarmReceiver.EXTRA_STAGE_TOKEN, stageToken)

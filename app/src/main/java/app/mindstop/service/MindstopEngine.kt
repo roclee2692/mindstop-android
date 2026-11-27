@@ -522,6 +522,8 @@ class MindstopEngine {
         }
     }
 
+    private var nextMorningBonusCheckElapsed = 0L
+
     private suspend fun onTick() {
         if (destroyed) return
         if (screenOn) {
@@ -539,11 +541,14 @@ class MindstopEngine {
         val nowElapsed = SystemClock.elapsedRealtime()
         val nowWall = trustedNow()
         rewards.settleDueRewards(nowWall)
-        morningRepo.deliverDueAfternoonBonusIfReady(nowWall)?.let { mins ->
-            showReminder(
-                service.getString(neth.iecal.curbox.R.string.mindstop_morning_bonus_afternoon_arrived, mins),
-                belowPill = false
-            )
+        if (nowElapsed >= nextMorningBonusCheckElapsed) {
+            nextMorningBonusCheckElapsed = nowElapsed + 60_000L
+            morningRepo.deliverDueAfternoonBonusIfReady(nowWall)?.let { mins ->
+                showReminder(
+                    service.getString(neth.iecal.curbox.R.string.mindstop_morning_bonus_afternoon_arrived, mins),
+                    belowPill = false
+                )
+            }
         }
         tickActiveFocus(nowWall, enteredPackage = null)
         if (packageName == null) {

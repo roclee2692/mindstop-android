@@ -59,9 +59,10 @@ object HardwareStepReader {
 
                 override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
             }
-            cont.invokeOnCancellation { manager.unregisterListener(listener) }
             if (!manager.registerListener(listener, counter, SensorManager.SENSOR_DELAY_NORMAL) && cont.isActive) {
                 cont.resumeWith(Result.success(Float.NaN))
             }
+            // Also runs immediately if cancellation happened during registration.
+            cont.invokeOnCancellation { manager.unregisterListener(listener) }
         }
 }

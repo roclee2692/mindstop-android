@@ -174,13 +174,13 @@ data class MorningV2Settings(
         delayedBonusMinutes,
         morningRestrictEndMinute,
         latestWakeMinuteOfDay,
-        customPrepItems.replace("|", " ")
+        customPrepItems
     ).joinToString("|")
 
     companion object {
         fun decode(raw: String?): MorningV2Settings {
             if (raw.isNullOrBlank()) return MorningV2Settings()
-            val p = raw.split('|')
+            val p = raw.split('|', limit = 15)
             if (p.size < 14) return MorningV2Settings()
             return MorningV2Settings(
                 stage1WindowMin = p[0].toIntOrNull()?.coerceIn(5, 60) ?: 15,
@@ -230,7 +230,8 @@ data class MorningRuntimeMeta(
     val bonusClaimed: Boolean = false,
     val bonusAfterNoon: Boolean = true,
     /** Optional self-rated wakefulness 0 (unset) or 1..5. */
-    val wakefulnessRating: Int = 0
+    val wakefulnessRating: Int = 0,
+    val stage1ReminderDelivered: Boolean = ringCount >= 2
 ) {
     val canOfferExtendedSleep: Boolean
         get() = ringCount >= 2
@@ -255,7 +256,8 @@ data class MorningRuntimeMeta(
         selectedJoy.replace("|", ""),
         if (bonusClaimed) 1 else 0,
         if (bonusAfterNoon) 1 else 0,
-        wakefulnessRating
+        wakefulnessRating,
+        if (stage1ReminderDelivered) 1 else 0
     ).joinToString("|")
 
     companion object {
@@ -293,8 +295,23 @@ data class MorningRuntimeMeta(
                 selectedJoy = p.getOrNull(16).orEmpty(),
                 bonusClaimed = p.getOrNull(17) == "1",
                 bonusAfterNoon = p.getOrNull(18)?.let { it == "1" } ?: true,
-                wakefulnessRating = p.getOrNull(19)?.toIntOrNull()?.coerceIn(0, 5) ?: 0
+                wakefulnessRating = p.getOrNull(19)?.toIntOrNull()?.coerceIn(0, 5) ?: 0,
+                stage1ReminderDelivered = p.getOrNull(20)?.let { it == "1" }
+                    ?: ((p.getOrNull(5)?.toIntOrNull() ?: 1) >= 2)
             )
+        }
+    }
+}
+
+/** Undelivered daily quota stored in the existing day|unlock|minutes|delivered meta value. */
+internal data class PendingMorningBonus(val dayKey: String, val unlockWall: Long, val minutes: Int) {
+    companion object {
+        fun forToday(raw: String?, nowWall: Long): PendingMorningBonus? {
+            val parts = raw?.split('|') ?: return null
+            if (parts.size != 4 || parts[3] != "0" || parts[0] != DayKeys.dayKey(nowWall)) return null
+            val unlock = parts[1].toLongOrNull()?.takeIf { it > 0L } ?: return null
+            val minutes = parts[2].toIntOrNull()?.takeIf { it in 1..60 } ?: return null
+            return PendingMorningBonus(parts[0], unlock, minutes)
         }
     }
 }
@@ -591,6 +608,7 @@ object MorningActivationEngine {
         nowWall: Long,
         rewardId: Long? = null
     ): MorningSessionRecord {
+        if (!session.status.isStage1 && session.status != MorningState.RINGING && session.status != MorningState.ACKNOWLEDGED) return session
         val delaySec = ((nowWall - session.ringStartedWall).coerceAtLeast(0L) / 1_000L).toInt()
         return session.copy(
             acknowledgedWall = session.acknowledgedWall ?: nowWall,
@@ -606,17 +624,30 @@ object MorningActivationEngine {
         session: MorningSessionRecord,
         meta: MorningRuntimeMeta,
         expectedStageToken: Long,
-        nowWall: Long
+        nowWall: Long,
+        secondRingOnly: Boolean = false
     ): StageTransition {
-        if (!session.status.isStage1 || meta.stageToken != expectedStageToken) {
+        if (!session.status.isStage1 || meta.stageToken != expectedStageToken || (secondRingOnly && meta.stage1ReminderDelivered)) {
             return StageTransition(session, meta, changed = false)
         }
         return StageTransition(
             session = session.copy(updatedWall = nowWall),
-            meta = meta.copy(ringCount = meta.ringCount + 1),
+            meta = meta.copy(ringCount = meta.ringCount + 1, stage1ReminderDelivered = true),
             changed = true
         )
     }
+
+    /** Restore at most one missed ring. Overtime takes precedence once the wake window ends. */
+    fun stage1RingTimes(start: Long, settings: MorningV2Settings, now: Long, reminderDelivered: Boolean): Pair<Long?, Long> {
+        val unlock = start + settings.stage1UnlockMs
+        val end = start + settings.stage1WindowMs
+        val second = if (!reminderDelivered && now < end && unlock < end) maxOf(unlock, now) else null
+        return second to maxOf(end, now)
+    }
+
+    fun instantRewardTimerWall(meta: MorningRuntimeMeta, now: Long): Long? =
+        meta.instantRewardEndWall.takeIf { meta.rewardChoice == MorningRewardChoice.INSTANT && it > 0L }
+            ?.coerceAtLeast(now)
 
     fun stage1BaseWall(session: MorningSessionRecord, meta: MorningRuntimeMeta? = null): Long =
         meta?.stage1StartWall?.takeIf { it > 0L } ?: session.ringStartedWall
@@ -726,6 +757,7 @@ object MorningActivationEngine {
                 stageToken = nextToken,
                 stage1StartWall = nowWall,
                 ringCount = 1,
+                stage1ReminderDelivered = false,
                 extendedSleepResumeWall = 0L,
                 wakeCheckState = WakeCheckSubState.NONE
             ),
@@ -787,7 +819,7 @@ object MorningActivationEngine {
     fun stepsSatisfyWakeCheck(baseline: Float, currentSteps: Float?, requiredSteps: Int = DEFAULT_STEP_PROOF_STEPS): Boolean =
         baseline >= 0f &&
             currentSteps != null &&
-            !currentSteps.isNaN() &&
+            currentSteps.isFinite() &&
             currentSteps >= baseline &&
             (currentSteps - baseline) >= requiredSteps.coerceAtLeast(1)
 
@@ -836,10 +868,12 @@ object MorningActivationEngine {
         if (session.status != MorningState.STAGE2_PREP) {
             return StageTransition(session, meta, changed = false)
         }
-        if (expectedCheckToken != null && expectedCheckToken > 0L && meta.wakeCheckToken != expectedCheckToken) {
+        if (expectedCheckToken != null && (expectedCheckToken != meta.wakeCheckToken || expectedCheckToken < 0L)) {
             return StageTransition(session, meta, changed = false)
         }
-        if (meta.wakeCheckState == WakeCheckSubState.CONFIRMED) {
+        if (meta.wakeCheckState == WakeCheckSubState.CONFIRMED ||
+            (meta.wakeCheckState == WakeCheckSubState.PROMPTED && nowWall >= meta.wakeCheckDeadlineWall)
+        ) {
             return StageTransition(session, meta, changed = false)
         }
         return StageTransition(
@@ -864,7 +898,8 @@ object MorningActivationEngine {
     ): StageTransition {
         if (session.status != MorningState.STAGE2_PREP ||
             meta.wakeCheckToken != expectedCheckToken ||
-            meta.wakeCheckState != WakeCheckSubState.PROMPTED
+            meta.wakeCheckState != WakeCheckSubState.PROMPTED ||
+            nowWall < meta.wakeCheckDeadlineWall
         ) {
             return StageTransition(session, meta, changed = false)
         }
@@ -875,6 +910,7 @@ object MorningActivationEngine {
                 stageToken = nextToken,
                 stage1StartWall = nowWall,
                 ringCount = (meta.ringCount + 1).coerceAtLeast(2),
+                stage1ReminderDelivered = false,
                 wakeCheckState = WakeCheckSubState.NONE,
                 wakeCheckPromptWall = 0L,
                 wakeCheckDeadlineWall = 0L,

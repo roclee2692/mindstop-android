@@ -26,6 +26,7 @@ import app.mindstop.core.MathGenerator
 import app.mindstop.core.MathQuestion
 import app.mindstop.core.MorningAlarm
 import app.mindstop.core.MorningRuntimeMeta
+import app.mindstop.core.MorningState
 import app.mindstop.core.MorningSessionRecord
 import app.mindstop.core.MorningV2Settings
 import app.mindstop.core.WakeupConfirmMethod
@@ -132,12 +133,19 @@ class MindstopAlarmRingActivity : AppCompatActivity(), SensorEventListener {
     }
 
     private suspend fun loadAlarmAndSetup() {
+        val requestedAlarm = alarmId
+        val requestedSession = sessionId
         val loaded = withContext(Dispatchers.IO) {
-            val a = if (alarmId > 0L) repo.getAlarm(alarmId) else null
-            val s = if (sessionId > 0L) repo.getSession(sessionId) else repo.activeSession(System.currentTimeMillis())
+            val a = if (requestedAlarm > 0L) repo.getAlarm(requestedAlarm) else null
+            val s = if (requestedSession > 0L) repo.getSession(requestedSession) else repo.activeSession(System.currentTimeMillis())
             val m = if (s != null) repo.loadRuntimeMeta(s.id) else MorningRuntimeMeta()
             val cfg = repo.loadSettings()
             Quad(a ?: MorningAlarm(id = alarmId), s, m, cfg)
+        }
+        if (requestedAlarm != alarmId || requestedSession != sessionId) return
+        if (requestedSession > 0 && loaded.session?.status?.let { it.isStage1 || it == MorningState.RINGING || it == MorningState.ACKNOWLEDGED } != true) {
+            finish()
+            return
         }
         alarm = loaded.alarm
         session = loaded.session
@@ -375,29 +383,16 @@ class MindstopAlarmRingActivity : AppCompatActivity(), SensorEventListener {
     private fun completeMuteToStage1() {
         if (busy) return
         busy = true
-        MindstopAlarmService.stop(this)
+        MindstopAlarmService.stop(this, sessionId)
         lifecycleScope.launch {
             val sid = withContext(Dispatchers.IO) {
                 val now = System.currentTimeMillis()
-                val actualSid = if (sessionId > 0L) {
-                    sessionId
-                } else {
-                    repo.startRinging(alarm, now, now).session.id
-                }
-                val snap = repo.acknowledgeAlarm(actualSid, now)
-                if (snap != null) {
-                    val cfg = repo.loadSettings()
-                    MindstopAlarmScheduler.scheduleStage1Timers(
-                        context = this@MindstopAlarmRingActivity,
-                        sessionId = actualSid,
-                        alarmId = alarm.id.coerceAtLeast(snap.session.alarmId),
-                        stageToken = snap.meta.stageToken,
-                        stage1StartWall = snap.meta.stage1StartWall,
-                        settings = cfg,
-                        nowWall = now
-                    )
-                }
-                actualSid
+                val actualSid = sessionId.takeIf { it > 0L } ?: repo.activeSession(now)?.id
+                actualSid?.let { repo.acknowledgeAlarm(it, now)?.session?.id }
+            }
+            if (sid == null) {
+                finish()
+                return@launch
             }
             startActivity(
                 Intent(this@MindstopAlarmRingActivity, MindstopMorningActivationActivity::class.java)
@@ -415,18 +410,11 @@ class MindstopAlarmRingActivity : AppCompatActivity(), SensorEventListener {
         MorningExtendedSleepDialog.show(this, s, meta, settings) { minutes ->
             if (busy) return@show
             busy = true
-            MindstopAlarmService.stop(this)
+            MindstopAlarmService.stop(this, sessionId)
             lifecycleScope.launch {
                 val now = System.currentTimeMillis()
                 val snap = withContext(Dispatchers.IO) { repo.enterExtendedSleep(s.id, minutes, now) }
                 if (snap != null && snap.changed) {
-                    MindstopAlarmScheduler.scheduleExtendedSleepResume(
-                        context = this@MindstopAlarmRingActivity,
-                        sessionId = s.id,
-                        alarmId = alarm.id.coerceAtLeast(s.alarmId),
-                        stageToken = snap.meta.stageToken,
-                        resumeAtWall = snap.meta.extendedSleepResumeWall
-                    )
                     val timeStr = DateFormat.getTimeFormat(this@MindstopAlarmRingActivity)
                         .format(Date(snap.meta.extendedSleepResumeWall))
                     Toast.makeText(
@@ -459,7 +447,7 @@ class MindstopAlarmRingActivity : AppCompatActivity(), SensorEventListener {
 
     private fun executeExit(returnedToBed: Boolean) {
         busy = true
-        MindstopAlarmService.stop(this)
+        MindstopAlarmService.stop(this, sessionId)
         lifecycleScope.launch {
             val sid = sessionId
             if (sid > 0L) {

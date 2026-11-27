@@ -1,5 +1,8 @@
 package app.mindstop.core
 
+import app.mindstop.service.MindstopAlarmReceiver
+import app.mindstop.service.MindstopAlarmScheduler
+
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -331,5 +334,116 @@ class MindstopMorningTest {
         assertFalse(MorningActivationEngine.eligibleForMorningReward(240))
         assertTrue(MorningActivationEngine.eligibleForMorningReward(300))
         assertTrue(MorningActivationEngine.eligibleForMorningReward(480))
+    }
+
+    @Test
+    fun lateMuteCannotReopenAnotherStageOrTerminalSession() {
+        val first = MorningActivationEngine.onRingStarted(MorningAlarm(), 100L, 100L)
+        for (state in listOf(MorningState.STAGE2_PREP, MorningState.EXTENDED_SLEEP,
+            MorningState.STAGE3_REWARD, MorningState.COMPLETED, MorningState.UNVERIFIED)) {
+            val before = first.copy(status = state)
+            assertEquals(before, MorningActivationEngine.onAlarmAcknowledged(before, 200L))
+        }
+    }
+
+    @Test
+    fun wakeConfirmationRequiresMatchingTokenAndAnUnexpiredWindow() {
+        val session = MorningActivationEngine.onRingStarted(MorningAlarm(), 1L, 1L)
+            .copy(status = MorningState.STAGE2_PREP)
+        val meta = MorningRuntimeMeta(wakeCheckToken = 4L, wakeCheckDeadlineWall = 500L,
+            wakeCheckState = WakeCheckSubState.PROMPTED)
+        for (token in listOf(0L, -1L, 3L)) {
+            assertFalse(MorningActivationEngine.confirmSilentWakeCheck(session, meta, token, 499L).changed)
+        }
+        assertTrue(MorningActivationEngine.confirmSilentWakeCheck(session, meta, 4L, 499L).changed)
+        assertFalse(MorningActivationEngine.confirmSilentWakeCheck(session, meta, 4L, 500L).changed)
+        assertFalse(MorningActivationEngine.confirmSilentWakeCheck(session, meta, 4L, 501L).changed)
+    }
+
+    @Test
+    fun customPrepTextPreservesPipesCommasAndLineBreaks() {
+        val cfg = MorningV2Settings(customPrepItems = "A|B,C\nD")
+        assertEquals(cfg, MorningV2Settings.decode(cfg.encode()))
+    }
+
+    @Test
+    fun stageOneRestoresOnlyTheOutstandingRingAtTheBoundary() {
+        val cfg = MorningV2Settings()
+        val start = 1000L
+        val unlock = start + cfg.stage1UnlockMs
+        val end = start + cfg.stage1WindowMs
+        for (now in listOf(unlock - 1, unlock, unlock + 1)) {
+            assertEquals(maxOf(now, unlock) to end, MorningActivationEngine.stage1RingTimes(start, cfg, now, false))
+        }
+        assertEquals(null to end, MorningActivationEngine.stage1RingTimes(start, cfg, unlock, true))
+        assertEquals(null to end + 42L, MorningActivationEngine.stage1RingTimes(start, cfg, end + 42L, false))
+    }
+
+    @Test
+    fun instantRewardRestoresBeforeAtAndAfterDeadlineOnlyForChoiceA() {
+        val meta = MorningRuntimeMeta(rewardChoice = MorningRewardChoice.INSTANT, instantRewardEndWall = 550L)
+        for (now in listOf(549L, 550L, 551L, 999_999L)) {
+            assertEquals(maxOf(now, 550L), MorningActivationEngine.instantRewardTimerWall(meta, now))
+            assertNull(MorningActivationEngine.instantRewardTimerWall(meta.copy(rewardChoice = MorningRewardChoice.NONE), now))
+        }
+    }
+
+    @Test
+    fun secondRingIsConsumedOnceAndLegacyRingCountsRecover() {
+        val session = MorningActivationEngine.onRingStarted(MorningAlarm(), 100L, 100L)
+        val meta = MorningRuntimeMeta()
+        val ring = MorningActivationEngine.onStage1RepeatRing(session, meta, meta.stageToken, 500L, secondRingOnly = true)
+        assertTrue(ring.changed)
+        val restored = MorningRuntimeMeta.decode(ring.meta.encode())
+        assertFalse(MorningActivationEngine.onStage1RepeatRing(ring.session, restored, restored.stageToken, 501L, true).changed)
+        val legacy = MorningRuntimeMeta.decode(ring.meta.encode().substringBeforeLast('|'))
+        assertTrue(legacy.stage1ReminderDelivered)
+        assertTrue(MorningActivationEngine.onStage1RepeatRing(ring.session, restored, restored.stageToken, 900L).changed)
+    }
+
+    @Test
+    fun bonusRecoveryAcceptsOnlyOutstandingQuotaForTheLocalDay() {
+        val noon = localTime(12, 0)
+        val day = DayKeys.dayKey(noon)
+        val raw = "$day|$noon|15|0"
+        val pending = PendingMorningBonus(day, noon, 15)
+        assertEquals(pending, PendingMorningBonus.forToday(raw, noon - 1L))
+        assertEquals(pending, PendingMorningBonus.forToday(raw, noon + 1L))
+        for (invalid in listOf("$day|$noon|15|1", "$day|$noon|0|0", "$day|broken|15|0", null)) {
+            assertNull(PendingMorningBonus.forToday(invalid, noon))
+        }
+        assertNull(PendingMorningBonus.forToday(raw, noon + 86_400_000L))
+    }
+
+    @Test
+    fun earlyDeadlineDeliveryDoesNotRollBackAnOpenPrompt() {
+        val session = MorningActivationEngine.onRingStarted(MorningAlarm(), 1L, 1L)
+            .copy(status = MorningState.STAGE2_PREP)
+        val meta = MorningRuntimeMeta(wakeCheckToken = 4L, wakeCheckState = WakeCheckSubState.PROMPTED,
+            wakeCheckDeadlineWall = 500L)
+        assertFalse(MorningActivationEngine.onSilentWakeCheckTimeout(session, meta, 4L, 499L).changed)
+        assertTrue(MorningActivationEngine.onSilentWakeCheckTimeout(session, meta, 4L, 500L).changed)
+    }
+
+    @Test
+    fun invalidStepCounterValuesCannotConfirmWakefulness() {
+        assertFalse(MorningActivationEngine.stepsSatisfyWakeCheck(100f, Float.POSITIVE_INFINITY))
+        assertFalse(MorningActivationEngine.stepsSatisfyWakeCheck(Float.NaN, 150f))
+    }
+
+    @Test
+    fun cleanupKeepsOnlyTimersForTheCommittedStage() {
+        val meta = MorningRuntimeMeta(wakeCheckState = WakeCheckSubState.PROMPTED)
+        val deadline = MindstopAlarmReceiver.ACTION_WAKE_CHECK_DEADLINE
+        val resume = MindstopAlarmReceiver.ACTION_EXTENDED_SLEEP_RESUME
+        val end = MindstopAlarmReceiver.ACTION_STAGE3_END
+        assertTrue(MindstopAlarmScheduler.keepStageTimer(deadline, MorningState.STAGE2_PREP, meta))
+        assertFalse(MindstopAlarmScheduler.keepStageTimer(deadline, MorningState.STAGE2_PREP,
+            meta.copy(wakeCheckState = WakeCheckSubState.CONFIRMED)))
+        assertTrue(MindstopAlarmScheduler.keepStageTimer(resume, MorningState.EXTENDED_SLEEP, meta))
+        assertFalse(MindstopAlarmScheduler.keepStageTimer(deadline, MorningState.EXTENDED_SLEEP, meta))
+        assertTrue(MindstopAlarmScheduler.keepStageTimer(end, MorningState.STAGE3_REWARD,
+            meta.copy(rewardChoice = MorningRewardChoice.INSTANT)))
+        assertFalse(MindstopAlarmScheduler.keepStageTimer(end, MorningState.COMPLETED, meta))
     }
 }

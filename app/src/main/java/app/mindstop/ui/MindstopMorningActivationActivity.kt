@@ -42,6 +42,7 @@ import com.google.android.material.color.MaterialColors
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import java.util.Date
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import neth.iecal.curbox.R
@@ -145,10 +146,15 @@ class MindstopMorningActivationActivity : AppCompatActivity(), SensorEventListen
         loadSessionFromIntent(intent)
     }
 
+    private var loadJob: Job? = null
+
     private fun loadSessionFromIntent(source: Intent) {
+        loadJob?.cancel()
+        refreshJob?.cancel()
+        nextStepReadElapsed = 0L
         sessionId = source.getLongExtra(MindstopAlarmReceiver.EXTRA_SESSION_ID, -1L)
         alarmId = source.getLongExtra(MindstopAlarmReceiver.EXTRA_ALARM_ID, -1L)
-        lifecycleScope.launch {
+        loadJob = lifecycleScope.launch {
             val now = System.currentTimeMillis()
             val loadedSession = withContext(Dispatchers.IO) {
                 if (sessionId > 0L) repo.getSession(sessionId) else repo.activeSession(now)
@@ -162,46 +168,39 @@ class MindstopMorningActivationActivity : AppCompatActivity(), SensorEventListen
             alarm = withContext(Dispatchers.IO) { repo.getAlarm(loadedSession.alarmId) } ?: MorningAlarm(id = alarmId)
             settings = withContext(Dispatchers.IO) { repo.loadSettings() }
             meta = withContext(Dispatchers.IO) { repo.loadRuntimeMeta(loadedSession.id) }
-            if (loadedSession.status == MorningState.STAGE2_PREP &&
-                settings.stepProofEnabled &&
-                meta.wakeCheckState != WakeCheckSubState.CONFIRMED
-            ) {
-                val auto = withContext(Dispatchers.IO) { repo.tryAutoConfirmWakeCheckBySteps(loadedSession.id, now) }
-                if (auto != null && auto.changed) {
-                    session = auto.session
-                    meta = auto.meta
-                    MindstopAlarmScheduler.cancelWakeCheckTimers(this@MindstopMorningActivationActivity, loadedSession.id)
-                }
-            }
             render()
-            registerAuxiliaryMotionHint()
+            if (lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) registerAuxiliaryMotionHint()
         }
     }
 
+    private var refreshJob: Job? = null
+    private var nextStepReadElapsed = 0L
+
     private fun refreshSessionSilently() {
         val sid = sessionId.takeIf { it > 0L } ?: return
-        if (busy) return
-        lifecycleScope.launch {
-            val now = System.currentTimeMillis()
+        if (busy || refreshJob?.isActive == true) return
+        refreshJob = lifecycleScope.launch {
             val pair = withContext(Dispatchers.IO) {
                 val s = repo.getSession(sid)
                 val m = repo.loadRuntimeMeta(sid)
                 s to m
             }
-            val latest = pair.first ?: return@launch
-            if (latest.status.isTerminal) {
+            if (busy || sid != sessionId) return@launch
+            val latest = pair.first
+            if (latest == null || latest.status.isTerminal) {
                 finish()
                 return@launch
             }
             if (latest.status == MorningState.STAGE2_PREP &&
-                settings.stepProofEnabled &&
-                pair.second.wakeCheckState != WakeCheckSubState.CONFIRMED
+                settings.stepProofEnabled && pair.second.stepBaseline >= 0f &&
+                pair.second.wakeCheckState != WakeCheckSubState.CONFIRMED &&
+                android.os.SystemClock.elapsedRealtime() >= nextStepReadElapsed
             ) {
-                val auto = withContext(Dispatchers.IO) { repo.tryAutoConfirmWakeCheckBySteps(sid, now) }
+                nextStepReadElapsed = android.os.SystemClock.elapsedRealtime() + 30_000L
+                val auto = withContext(Dispatchers.IO) { repo.tryAutoConfirmWakeCheckBySteps(sid, pair.second.wakeCheckToken) }
                 if (auto != null && auto.changed) {
                     session = auto.session
                     meta = auto.meta
-                    MindstopAlarmScheduler.cancelWakeCheckTimers(this@MindstopMorningActivationActivity, sid)
                     render()
                     return@launch
                 }
@@ -218,6 +217,7 @@ class MindstopMorningActivationActivity : AppCompatActivity(), SensorEventListen
 
     override fun onResume() {
         super.onResume()
+        if (session != null) registerAuxiliaryMotionHint()
         handler.post(ticker)
         ContextCompat.registerReceiver(
             this,
@@ -237,6 +237,8 @@ class MindstopMorningActivationActivity : AppCompatActivity(), SensorEventListen
             unregisterReceiver(alarmRingReceiver)
         } catch (_: Exception) {
         }
+        refreshJob?.cancel()
+        sensorManager?.unregisterListener(this)
         handler.removeCallbacks(ticker)
         super.onPause()
     }
@@ -543,19 +545,6 @@ class MindstopMorningActivationActivity : AppCompatActivity(), SensorEventListen
         lifecycleScope.launch {
             val snap = withContext(Dispatchers.IO) { repo.enterStage2(sid, now) }
             if (snap != null && snap.changed) {
-                MindstopAlarmScheduler.scheduleStage2Timers(
-                    context = this@MindstopMorningActivationActivity,
-                    sessionId = sid,
-                    alarmId = alarm.id.coerceAtLeast(snap.session.alarmId),
-                    stageToken = snap.meta.stageToken,
-                    wakeCheckToken = snap.meta.wakeCheckToken,
-                    stage2StartWall = snap.meta.stage2StartWall,
-                    wakeCheckState = snap.meta.wakeCheckState,
-                    wakeCheckPromptWall = snap.meta.wakeCheckPromptWall,
-                    wakeCheckDeadlineWall = snap.meta.wakeCheckDeadlineWall,
-                    settings = settings,
-                    nowWall = now
-                )
                 session = snap.session
                 meta = snap.meta
                 Toast.makeText(
@@ -579,13 +568,6 @@ class MindstopMorningActivationActivity : AppCompatActivity(), SensorEventListen
                 val now = System.currentTimeMillis()
                 val snap = withContext(Dispatchers.IO) { repo.enterExtendedSleep(s.id, minutes, now) }
                 if (snap != null && snap.changed) {
-                    MindstopAlarmScheduler.scheduleExtendedSleepResume(
-                        context = this@MindstopMorningActivationActivity,
-                        sessionId = s.id,
-                        alarmId = alarm.id.coerceAtLeast(s.alarmId),
-                        stageToken = snap.meta.stageToken,
-                        resumeAtWall = snap.meta.extendedSleepResumeWall
-                    )
                     session = snap.session
                     meta = snap.meta
                     val timeStr = DateFormat.getTimeFormat(this@MindstopMorningActivationActivity)
@@ -610,15 +592,6 @@ class MindstopMorningActivationActivity : AppCompatActivity(), SensorEventListen
             val now = System.currentTimeMillis()
             val snap = withContext(Dispatchers.IO) { repo.resumeFromExtendedSleep(sid, meta.stageToken, now) }
             if (snap != null && snap.changed) {
-                MindstopAlarmScheduler.scheduleStage1Timers(
-                    context = this@MindstopMorningActivationActivity,
-                    sessionId = sid,
-                    alarmId = alarm.id.coerceAtLeast(snap.session.alarmId),
-                    stageToken = snap.meta.stageToken,
-                    stage1StartWall = snap.meta.stage1StartWall,
-                    settings = settings,
-                    nowWall = now
-                )
                 session = snap.session
                 meta = snap.meta
             }
@@ -636,7 +609,6 @@ class MindstopMorningActivationActivity : AppCompatActivity(), SensorEventListen
                 repo.confirmSilentWakeCheck(sid, meta.wakeCheckToken, System.currentTimeMillis())
             }
             if (snap != null && snap.changed) {
-                MindstopAlarmScheduler.cancelWakeCheckTimers(this@MindstopMorningActivationActivity, sid)
                 session = snap.session
                 meta = snap.meta
                 Toast.makeText(
@@ -659,10 +631,10 @@ class MindstopMorningActivationActivity : AppCompatActivity(), SensorEventListen
             val now = System.currentTimeMillis()
             val (snap, confirmedReward) = withContext(Dispatchers.IO) { repo.enterStage3(sid, now) }
             if (snap != null && snap.changed) {
-                MindstopAlarmScheduler.cancelAllStageTimers(this@MindstopMorningActivationActivity, sid)
                 session = snap.session
                 meta = snap.meta
                 if (snap.session.status == MorningState.COMPLETED) {
+                    MindstopAlarmScheduler.cancelAllStageTimers(this@MindstopMorningActivationActivity, sid)
                     showCompletedToastAndFinish(confirmedReward)
                     return@launch
                 }
@@ -680,13 +652,6 @@ class MindstopMorningActivationActivity : AppCompatActivity(), SensorEventListen
             val now = System.currentTimeMillis()
             val snap = withContext(Dispatchers.IO) { repo.chooseInstantReward(sid, now) }
             if (snap != null && snap.changed) {
-                MindstopAlarmScheduler.scheduleStage3End(
-                    context = this@MindstopMorningActivationActivity,
-                    sessionId = sid,
-                    alarmId = alarm.id.coerceAtLeast(snap.session.alarmId),
-                    stageToken = snap.meta.stageToken,
-                    endWall = snap.meta.instantRewardEndWall
-                )
                 session = snap.session
                 meta = snap.meta
             }
@@ -753,8 +718,13 @@ class MindstopMorningActivationActivity : AppCompatActivity(), SensorEventListen
         if (busy) return
         busy = true
         lifecycleScope.launch {
-            val (_, confirmed) = withContext(Dispatchers.IO) {
+            val (completed, confirmed) = withContext(Dispatchers.IO) {
                 repo.completeActivation(sid, System.currentTimeMillis())
+            }
+            if (completed == null) {
+                busy = false
+                refreshSessionSilently()
+                return@launch
             }
             MindstopAlarmScheduler.cancelAllStageTimers(this@MindstopMorningActivationActivity, sid)
             showCompletedToastAndFinish(confirmed)
@@ -805,17 +775,23 @@ class MindstopMorningActivationActivity : AppCompatActivity(), SensorEventListen
 
     /** Auxiliary motion hint only: recorded passively, never auto-completes wake-up. */
     private fun registerAuxiliaryMotionHint() {
+        if (motionRecorded) return
         val sm = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         sensorManager = sm
         val sensor = sm.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR) ?: return
-        sm.registerListener(this, sensor, SensorManager.SENSOR_DELAY_NORMAL)
+        try {
+            sm.registerListener(this, sensor, SensorManager.SENSOR_DELAY_NORMAL)
+        } catch (_: SecurityException) {
+            // Motion hints are optional when activity recognition permission is unavailable.
+        }
     }
 
     override fun onSensorChanged(event: SensorEvent?) {
         if (motionRecorded || sessionId <= 0L) return
+        val sid = sessionId
         motionRecorded = true
         sensorManager?.unregisterListener(this)
-        lifecycleScope.launch(Dispatchers.IO) { repo.markMotionHint(sessionId, System.currentTimeMillis()) }
+        lifecycleScope.launch(Dispatchers.IO) { repo.markMotionHint(sid, System.currentTimeMillis()) }
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit

@@ -60,7 +60,8 @@ class MindstopAlarmService : Service() {
 
         fun isRinging(): Boolean = activeAlarmId > 0L
 
-        fun stop(context: Context) {
+        fun stop(context: Context, sessionId: Long = activeSessionId) {
+            if (sessionId != activeSessionId) return
             activeAlarmId = -1L
             activeSessionId = -1L
             try {
@@ -110,8 +111,10 @@ class MindstopAlarmService : Service() {
                 return START_NOT_STICKY
             }
             ACTION_DISMISS_FROM_NOTIFICATION -> {
-                val aid = intent.getLongExtra(MindstopAlarmReceiver.EXTRA_ALARM_ID, activeAlarmId)
-                val sid = intent.getLongExtra(MindstopAlarmReceiver.EXTRA_SESSION_ID, activeSessionId)
+                val sid = intent.getLongExtra(MindstopAlarmReceiver.EXTRA_SESSION_ID, -1L)
+                if (activeSessionId > 0L && sid != activeSessionId) return START_NOT_STICKY
+                generation.incrementAndGet()
+                mainHandler.removeCallbacks(safetyTimeout)
                 activeAlarmId = -1L
                 activeSessionId = -1L
                 stopAudio()
@@ -123,21 +126,10 @@ class MindstopAlarmService : Service() {
                     scope.launch {
                         try {
                             val morningRepo = MorningRepository(applicationContext)
-                            val snap = morningRepo.acknowledgeAlarm(sid, System.currentTimeMillis())
-                            if (snap != null) {
-                                val settings = morningRepo.loadSettings()
-                                MindstopAlarmScheduler.scheduleStage1Timers(
-                                    context = applicationContext,
-                                    sessionId = sid,
-                                    alarmId = aid.coerceAtLeast(snap.session.alarmId),
-                                    stageToken = snap.meta.stageToken,
-                                    stage1StartWall = snap.meta.stage1StartWall,
-                                    settings = settings
-                                )
-                            }
+                            morningRepo.acknowledgeAlarm(sid, System.currentTimeMillis())
                         } catch (_: Exception) {
                         }
-                        mainHandler.post { stopSelf() }
+                        mainHandler.post { stopSelf(startId) }
                     }
                 } else {
                     stopSelf()
@@ -181,7 +173,7 @@ class MindstopAlarmService : Service() {
                 null
             } ?: MorningAlarm(id = alarmId)
             mainHandler.post {
-                if (generation.get() != myGen) return@post
+                if (generation.get() != myGen || activeSessionId != sessionId) return@post
                 val label = alarm.label.ifBlank { getString(R.string.mindstop_morning_ring_default_label) }
                 val nm = getSystemService(NotificationManager::class.java)
                 nm.notify(NOTIFICATION_ID, buildNotification(alarmId, sessionId, label))

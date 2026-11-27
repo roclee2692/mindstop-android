@@ -251,10 +251,11 @@ interface MorningSessionDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(session: MorningSessionEntity): Long
 
-    @Query("SELECT * FROM morning_sessions WHERE id = :id")
-    suspend fun byId(id: Long): MorningSessionEntity?
+    // A previous build could leave two sessions open. Only the newest may respond to UI or timers.
+    @Query("SELECT * FROM morning_sessions WHERE id = :id AND id = (SELECT MAX(id) FROM morning_sessions)")
+    suspend fun latestById(id: Long): MorningSessionEntity?
 
-    @Query("SELECT * FROM morning_sessions WHERE status IN ('RINGING', 'ACKNOWLEDGED', 'ACTIVATION', 'STAGE1_WAKE', 'EXTENDED_SLEEP', 'STAGE2_PREP', 'STAGE3_REWARD') ORDER BY id DESC LIMIT 1")
+    @Query("SELECT * FROM morning_sessions WHERE id = (SELECT MAX(id) FROM morning_sessions) AND status IN ('RINGING', 'ACKNOWLEDGED', 'ACTIVATION', 'STAGE1_WAKE', 'EXTENDED_SLEEP', 'STAGE2_PREP', 'STAGE3_REWARD')")
     suspend fun activeSession(): MorningSessionEntity?
 
     @Query("SELECT * FROM morning_sessions WHERE dayKey = :dayKey AND status = 'COMPLETED' ORDER BY completedWall DESC LIMIT 1")
