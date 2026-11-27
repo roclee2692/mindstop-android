@@ -39,6 +39,9 @@ interface UsageSegmentDao {
     @Query("SELECT COALESCE(SUM(durationMs), 0) FROM usage_segments WHERE dayKey = :dayKey AND (mode IS NULL OR mode != 'STUDY') AND packageName IN (:packages)")
     suspend fun totalForPackages(dayKey: String, packages: List<String>): Long
 
+    @Query("SELECT COALESCE(SUM(durationMs), 0) FROM usage_segments WHERE startWall >= :fromWall AND startWall < :toWall AND (mode IS NULL OR mode != 'STUDY') AND packageName IN (:packages)")
+    suspend fun entertainmentTotalInWindow(fromWall: Long, toWall: Long, packages: List<String>): Long
+
     @Query("SELECT * FROM usage_segments WHERE sessionId = :sessionId")
     suspend fun segmentsOfSession(sessionId: Long): List<UsageSegmentEntity>
 
@@ -251,7 +254,7 @@ interface MorningSessionDao {
     @Query("SELECT * FROM morning_sessions WHERE id = :id")
     suspend fun byId(id: Long): MorningSessionEntity?
 
-    @Query("SELECT * FROM morning_sessions WHERE status IN ('RINGING', 'ACKNOWLEDGED', 'ACTIVATION', 'STAGE1_WAKE', 'STAGE2_PREP', 'STAGE3_REWARD') ORDER BY id DESC LIMIT 1")
+    @Query("SELECT * FROM morning_sessions WHERE status IN ('RINGING', 'ACKNOWLEDGED', 'ACTIVATION', 'STAGE1_WAKE', 'EXTENDED_SLEEP', 'STAGE2_PREP', 'STAGE3_REWARD') ORDER BY id DESC LIMIT 1")
     suspend fun activeSession(): MorningSessionEntity?
 
     @Query("SELECT * FROM morning_sessions WHERE dayKey = :dayKey AND status = 'COMPLETED' ORDER BY completedWall DESC LIMIT 1")

@@ -31,7 +31,7 @@
                 android:textAppearance="?attr/textAppearanceBodyMedium"
                 android:textColor="?attr/colorOnSurfaceVariant" />
 
-            <!-- Exact alarm permission notice if missing -->
+            <!-- Permission health notice (Exact alarm / Notification / Battery) -->
             <com.google.android.material.card.MaterialCardView
                 android:id="@+id/morning_exact_warn_card"
                 style="@style/Widget.Mindstop.Card"
@@ -48,6 +48,7 @@
                     android:padding="14dp">
 
                     <TextView
+                        android:id="@+id/morning_health_warn_text"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:text="@string/mindstop_morning_exact_warn"
@@ -108,6 +109,14 @@
                     android:text="@string/mindstop_morning_sync_plan" />
             </LinearLayout>
 
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/morning_v2_settings_btn"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/mindstop_morning_v2_settings_btn" />
+
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
@@ -122,6 +131,66 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
                 android:orientation="vertical" />
+
+            <!-- Local Morning Behavior Statistics (7 / 14 / 30 days) -->
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="22dp"
+                android:text="@string/mindstop_morning_stats_title"
+                android:textAppearance="?attr/textAppearanceTitleMedium"
+                android:textColor="?attr/colorOnSurface" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:orientation="horizontal">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/morning_stats_7d"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginEnd="6dp"
+                    android:layout_weight="1"
+                    android:text="@string/mindstop_morning_stats_7d" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/morning_stats_14d"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginHorizontal="3dp"
+                    android:layout_weight="1"
+                    android:text="@string/mindstop_morning_stats_14d" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/morning_stats_30d"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="6dp"
+                    android:layout_weight="1"
+                    android:text="@string/mindstop_morning_stats_30d" />
+            </LinearLayout>
+
+            <com.google.android.material.card.MaterialCardView
+                style="@style/Widget.Mindstop.Card"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                app:cardBackgroundColor="?attr/colorSurfaceContainerLow">
+
+                <TextView
+                    android:id="@+id/morning_stats_body"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:lineSpacingExtra="4dp"
+                    android:padding="16dp"
+                    android:textAppearance="?attr/textAppearanceBodyMedium"
+                    android:textColor="?attr/colorOnSurfaceVariant" />
+            </com.google.android.material.card.MaterialCardView>
 
             <!-- Bedtime <-> Morning Observational Linkage (§14) -->
             <TextView

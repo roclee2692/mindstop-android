@@ -91,14 +91,28 @@
         android:id="@+id/ring_dismiss_btn"
         android:layout_width="match_parent"
         android:layout_height="56dp"
-        android:text="@string/mindstop_morning_ring_dismiss" />
+        android:text="@string/mindstop_morning_ring_mute_stage1" />
 
+    <!-- Low-visual-weight intentional sleep extension: unlocked ONLY from 2nd ring onward -->
     <com.google.android.material.button.MaterialButton
-        android:id="@+id/ring_snooze_btn"
-        style="@style/Widget.Material3.Button.OutlinedButton"
+        android:id="@+id/ring_extend_sleep_btn"
+        style="@style/Widget.Material3.Button.TextButton"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="10dp"
-        android:text="@string/mindstop_morning_ring_snooze" />
+        android:layout_marginTop="8dp"
+        android:minHeight="48dp"
+        android:text="@string/mindstop_morning_extend_entry_btn"
+        android:textColor="#556B5E"
+        android:visibility="gone" />
+
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/ring_emergency_exit_btn"
+        style="@style/Widget.Material3.Button.TextButton"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="2dp"
+        android:minHeight="48dp"
+        android:text="@string/mindstop_morning_emergency_exit_short"
+        android:textColor="#6B7A70" />
 
 </LinearLayout>

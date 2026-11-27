@@ -14,22 +14,26 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.text.format.DateFormat
 import android.view.View
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.addCallback
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import app.mindstop.core.Difficulty
 import app.mindstop.core.MathGenerator
 import app.mindstop.core.MathQuestion
 import app.mindstop.core.MorningAlarm
+import app.mindstop.core.MorningRuntimeMeta
+import app.mindstop.core.MorningSessionRecord
+import app.mindstop.core.MorningV2Settings
 import app.mindstop.core.WakeupConfirmMethod
 import app.mindstop.service.MindstopAlarmReceiver
 import app.mindstop.service.MindstopAlarmScheduler
 import app.mindstop.service.MindstopAlarmService
 import app.mindstop.service.MorningRepository
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.Dispatchers
@@ -43,10 +47,13 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * Lock-screen morning alarm ringing activity (v0.3 SPEC §10–§11).
- * Shows directly over the lock screen, supports optional Math (reusing existing [MathGenerator]),
- * Step sensor, QR scan, or NFC verification, and immediately transitions into the 15-minute
- * [MindstopMorningActivationActivity] instead of falsely claiming wake-up is already complete.
+ * Lock-screen morning alarm ringing activity (Morning Activation V2).
+ *
+ * - 1st ring: allows temporary mute into Stage 1 (does NOT mark wake-up done, does NOT offer
+ *   ordinary sleep extension yet).
+ * - 2nd ring onward (`meta.ringCount >= 2`): reveals the low-visual-weight "仍需休息一会儿"
+ *   text button (3-second press-and-hold confirmation, no high-cognitive math punishment).
+ * - Always keeps an honest Emergency Exit option (records as UNVERIFIED, never COMPLETED).
  */
 class MindstopAlarmRingActivity : AppCompatActivity(), SensorEventListener {
 
@@ -58,6 +65,9 @@ class MindstopAlarmRingActivity : AppCompatActivity(), SensorEventListener {
     private var alarmId: Long = -1L
     private var sessionId: Long = -1L
     private var alarm: MorningAlarm = MorningAlarm()
+    private var session: MorningSessionRecord? = null
+    private var meta: MorningRuntimeMeta = MorningRuntimeMeta()
+    private var settings: MorningV2Settings = MorningV2Settings()
     private var busy = false
 
     // Challenge state
@@ -75,7 +85,7 @@ class MindstopAlarmRingActivity : AppCompatActivity(), SensorEventListener {
         if (contents.isBlank()) return@registerForActivityResult
         if (alarm.targetTagOrQr.isBlank() || contents.equals(alarm.targetTagOrQr.trim(), ignoreCase = true)) {
             challengePassed = true
-            completeDismiss()
+            completeMuteToStage1()
         } else {
             Toast.makeText(this, R.string.mindstop_morning_qr_mismatch, Toast.LENGTH_SHORT).show()
         }
@@ -108,12 +118,13 @@ class MindstopAlarmRingActivity : AppCompatActivity(), SensorEventListener {
         onBackPressedDispatcher.addCallback(this) { /* Keep ring screen focused while ringing */ }
         binding.ringDismissBtn.setOnClickListener {
             if (challengePassed || alarm.dismissMethod == WakeupConfirmMethod.MANUAL) {
-                completeDismiss()
+                completeMuteToStage1()
             } else {
                 Toast.makeText(this, R.string.mindstop_morning_finish_verify_first, Toast.LENGTH_SHORT).show()
             }
         }
-        binding.ringSnoozeBtn.setOnClickListener { snooze() }
+        binding.ringExtendSleepBtn.setOnClickListener { openExtendedSleepPicker() }
+        binding.ringEmergencyExitBtn.setOnClickListener { confirmEmergencyExit() }
 
         lifecycleScope.launch {
             loadAlarmAndSetup()
@@ -122,13 +133,30 @@ class MindstopAlarmRingActivity : AppCompatActivity(), SensorEventListener {
 
     private suspend fun loadAlarmAndSetup() {
         val loaded = withContext(Dispatchers.IO) {
-            if (alarmId > 0L) repo.getAlarm(alarmId) else null
-        } ?: MorningAlarm(id = alarmId)
-        alarm = loaded
+            val a = if (alarmId > 0L) repo.getAlarm(alarmId) else null
+            val s = if (sessionId > 0L) repo.getSession(sessionId) else repo.activeSession(System.currentTimeMillis())
+            val m = if (s != null) repo.loadRuntimeMeta(s.id) else MorningRuntimeMeta()
+            val cfg = repo.loadSettings()
+            Quad(a ?: MorningAlarm(id = alarmId), s, m, cfg)
+        }
+        alarm = loaded.alarm
+        session = loaded.session
+        if (loaded.session != null) sessionId = loaded.session.id
+        meta = loaded.meta
+        settings = loaded.settings
+
         binding.ringLabel.text = alarm.label.ifBlank { getString(R.string.mindstop_morning_ring_default_label) }
-        binding.ringSnoozeBtn.text = getString(R.string.mindstop_morning_ring_snooze_min, alarm.snoozeMinutes)
+        // Only reveal intentional sleep extension starting from the 2nd ring (never on 1st ring!)
+        binding.ringExtendSleepBtn.visibility = if (meta.canOfferExtendedSleep) View.VISIBLE else View.GONE
         setupChallenge()
     }
+
+    private data class Quad(
+        val alarm: MorningAlarm,
+        val session: MorningSessionRecord?,
+        val meta: MorningRuntimeMeta,
+        val settings: MorningV2Settings
+    )
 
     override fun onResume() {
         super.onResume()
@@ -166,7 +194,7 @@ class MindstopAlarmRingActivity : AppCompatActivity(), SensorEventListener {
         super.onNewIntent(intent)
         val incomingAlarmId = intent.getLongExtra(MindstopAlarmReceiver.EXTRA_ALARM_ID, -1L)
         val incomingSessionId = intent.getLongExtra(MindstopAlarmReceiver.EXTRA_SESSION_ID, -1L)
-        if (incomingAlarmId > 0L && (incomingAlarmId != alarmId || incomingSessionId != sessionId || busy)) {
+        if (incomingAlarmId > 0L) {
             setIntent(intent)
             sensorManager?.unregisterListener(this)
             disableNfcDispatch()
@@ -191,7 +219,7 @@ class MindstopAlarmRingActivity : AppCompatActivity(), SensorEventListener {
             val tagId = tag?.id?.joinToString("") { "%02X".format(it) }.orEmpty()
             if (tagId.isNotBlank() && (alarm.targetTagOrQr.isBlank() || tagId.equals(alarm.targetTagOrQr.trim(), ignoreCase = true))) {
                 challengePassed = true
-                completeDismiss()
+                completeMuteToStage1()
             } else if (tagId.isNotBlank()) {
                 Toast.makeText(this, R.string.mindstop_morning_nfc_mismatch, Toast.LENGTH_SHORT).show()
             }
@@ -215,7 +243,6 @@ class MindstopAlarmRingActivity : AppCompatActivity(), SensorEventListener {
     }
 
     private fun setupChallenge() {
-        // Reset visibility cleanly in case onNewIntent reloads a second alarm with a different method.
         binding.ringChallengeAction.visibility = View.VISIBLE
         binding.ringChallengeAction.setOnClickListener(null)
         when (alarm.dismissMethod) {
@@ -245,7 +272,7 @@ class MindstopAlarmRingActivity : AppCompatActivity(), SensorEventListener {
                     binding.ringChallengeAction.setText(R.string.mindstop_morning_steps_fallback)
                     binding.ringChallengeAction.setOnClickListener {
                         challengePassed = true
-                        completeDismiss()
+                        completeMuteToStage1()
                     }
                     binding.ringDismissBtn.visibility = View.GONE
                 } else {
@@ -299,7 +326,7 @@ class MindstopAlarmRingActivity : AppCompatActivity(), SensorEventListener {
             val needed = alarm.challengeCount.coerceIn(1, 5)
             if (mathSolved >= needed) {
                 challengePassed = true
-                completeDismiss()
+                completeMuteToStage1()
             } else {
                 showNextMath()
             }
@@ -317,7 +344,7 @@ class MindstopAlarmRingActivity : AppCompatActivity(), SensorEventListener {
         if (stepsCount >= targetSteps) {
             challengePassed = true
             sensorManager?.unregisterListener(this)
-            completeDismiss()
+            completeMuteToStage1()
         }
     }
 
@@ -344,7 +371,8 @@ class MindstopAlarmRingActivity : AppCompatActivity(), SensorEventListener {
         }
     }
 
-    private fun completeDismiss() {
+    /** Temporarily mutes alarm audio and opens Stage 1 without marking wake-up complete. */
+    private fun completeMuteToStage1() {
         if (busy) return
         busy = true
         MindstopAlarmService.stop(this)
@@ -354,19 +382,23 @@ class MindstopAlarmRingActivity : AppCompatActivity(), SensorEventListener {
                 val actualSid = if (sessionId > 0L) {
                     sessionId
                 } else {
-                    repo.startRinging(alarm, now, now).id
+                    repo.startRinging(alarm, now, now).session.id
                 }
-                repo.acknowledgeAlarm(actualSid, now)
+                val snap = repo.acknowledgeAlarm(actualSid, now)
+                if (snap != null) {
+                    val cfg = repo.loadSettings()
+                    MindstopAlarmScheduler.scheduleStage1Timers(
+                        context = this@MindstopAlarmRingActivity,
+                        sessionId = actualSid,
+                        alarmId = alarm.id.coerceAtLeast(snap.session.alarmId),
+                        stageToken = snap.meta.stageToken,
+                        stage1StartWall = snap.meta.stage1StartWall,
+                        settings = cfg,
+                        nowWall = now
+                    )
+                }
                 actualSid
             }
-            MindstopAlarmScheduler.scheduleActivationCheckins(
-                context = this@MindstopAlarmRingActivity,
-                sessionId = sid,
-                alarmId = alarm.id,
-                firstCheckMin = 5,
-                finalCheckMin = 15,
-                backupReminderEnabled = alarm.backupReminderEnabled
-            )
             startActivity(
                 Intent(this@MindstopAlarmRingActivity, MindstopMorningActivationActivity::class.java)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
@@ -377,14 +409,71 @@ class MindstopAlarmRingActivity : AppCompatActivity(), SensorEventListener {
         }
     }
 
-    private fun snooze() {
+    private fun openExtendedSleepPicker() {
+        val s = session ?: return
+        if (!meta.canOfferExtendedSleep || busy) return
+        MorningExtendedSleepDialog.show(this, s, meta, settings) { minutes ->
+            if (busy) return@show
+            busy = true
+            MindstopAlarmService.stop(this)
+            lifecycleScope.launch {
+                val now = System.currentTimeMillis()
+                val snap = withContext(Dispatchers.IO) { repo.enterExtendedSleep(s.id, minutes, now) }
+                if (snap != null && snap.changed) {
+                    MindstopAlarmScheduler.scheduleExtendedSleepResume(
+                        context = this@MindstopAlarmRingActivity,
+                        sessionId = s.id,
+                        alarmId = alarm.id.coerceAtLeast(s.alarmId),
+                        stageToken = snap.meta.stageToken,
+                        resumeAtWall = snap.meta.extendedSleepResumeWall
+                    )
+                    val timeStr = DateFormat.getTimeFormat(this@MindstopAlarmRingActivity)
+                        .format(Date(snap.meta.extendedSleepResumeWall))
+                    Toast.makeText(
+                        this@MindstopAlarmRingActivity,
+                        getString(R.string.mindstop_morning_extend_confirmed_toast, timeStr),
+                        Toast.LENGTH_LONG
+                    ).show()
+                    finishAndRemoveTask()
+                } else {
+                    busy = false
+                }
+            }
+        }
+    }
+
+    private fun confirmEmergencyExit() {
         if (busy) return
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.mindstop_morning_exit_dialog_title)
+            .setMessage(R.string.mindstop_morning_exit_dialog_msg)
+            .setPositiveButton(R.string.mindstop_morning_exit_emergency_btn) { _, _ ->
+                executeExit(returnedToBed = false)
+            }
+            .setNeutralButton(R.string.mindstop_morning_exit_back_bed_btn) { _, _ ->
+                executeExit(returnedToBed = true)
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
+    }
+
+    private fun executeExit(returnedToBed: Boolean) {
         busy = true
         MindstopAlarmService.stop(this)
-        if (alarm.id > 0L) {
-            MindstopAlarmScheduler.scheduleSnooze(this, alarm.id, alarm.snoozeMinutes)
+        lifecycleScope.launch {
+            val sid = sessionId
+            if (sid > 0L) {
+                withContext(Dispatchers.IO) {
+                    repo.reportExitNotCompleted(sid, returnedToBed = returnedToBed, nowWall = System.currentTimeMillis())
+                }
+                MindstopAlarmScheduler.cancelAllStageTimers(this@MindstopAlarmRingActivity, sid)
+            }
+            Toast.makeText(
+                this@MindstopAlarmRingActivity,
+                if (returnedToBed) R.string.mindstop_morning_act_returned_toast else R.string.mindstop_morning_emergency_exit_toast,
+                Toast.LENGTH_LONG
+            ).show()
+            finishAndRemoveTask()
         }
-        Toast.makeText(this, getString(R.string.mindstop_morning_snoozed_toast, alarm.snoozeMinutes), Toast.LENGTH_SHORT).show()
-        finishAndRemoveTask()
     }
 }

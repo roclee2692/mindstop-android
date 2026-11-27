@@ -641,6 +641,34 @@ class MindstopEngine {
             bedtimeEval.isNightRestrictedPhase &&
             nowWall >= bedtimeAllowUntil
 
+        // Morning Activation Stage 1 & Stage 2 distraction guard: restrict supervised high-distraction
+        // apps while leaving exempt daily tools unrestricted.
+        val morningPrepBlocking = !isActiveStudy &&
+            verdict.supervised &&
+            packageName !in exempt &&
+            morningRepo.isMorningPrepBlockingActive(nowWall)
+        if (morningPrepBlocking) {
+            hideSessionOverlay()
+            if (nowElapsed - lastBlockElapsed >= BLOCK_MIN_GAP_MS) {
+                lastBlockElapsed = nowElapsed
+                repo.logEvent("morning_prep_redirect", packageName, nowWall)
+                mainHandler.post {
+                    if (destroyed) return@post
+                    reminderOverlay.show(
+                        service.getString(neth.iecal.curbox.R.string.mindstop_morning_prep_redirect_banner),
+                        belowPill = false
+                    )
+                    val actIntent = Intent(service, app.mindstop.ui.MindstopMorningActivationActivity::class.java)
+                    BackgroundActivityLauncher.launch(
+                        service,
+                        actIntent,
+                        (packageName.hashCode() and 0x3FFF) + 78_000
+                    )
+                }
+            }
+            return verdict
+        }
+
         val effectivelyBlocked = (verdict.blocked && !isActiveStudy) || bedtimeBlocking
 
         lastSupervisedPackage = packageName

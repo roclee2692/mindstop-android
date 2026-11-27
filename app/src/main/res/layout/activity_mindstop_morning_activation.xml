@@ -24,7 +24,7 @@
             android:orientation="vertical"
             android:padding="20dp">
 
-            <!-- Sequential 3-Step Progress Strip -->
+            <!-- Sequential 3-Step Progress Strip with explicit status labels -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -49,7 +49,7 @@
                         android:paddingHorizontal="6dp"
                         android:paddingVertical="9dp"
                         android:text="@string/mindstop_morning_step1_short"
-                        android:textAppearance="?attr/textAppearanceLabelMedium" />
+                        android:textAppearance="?attr/textAppearanceLabelSmall" />
                 </com.google.android.material.card.MaterialCardView>
 
                 <com.google.android.material.card.MaterialCardView
@@ -70,7 +70,7 @@
                         android:paddingHorizontal="6dp"
                         android:paddingVertical="9dp"
                         android:text="@string/mindstop_morning_step2_short"
-                        android:textAppearance="?attr/textAppearanceLabelMedium" />
+                        android:textAppearance="?attr/textAppearanceLabelSmall" />
                 </com.google.android.material.card.MaterialCardView>
 
                 <com.google.android.material.card.MaterialCardView
@@ -91,11 +91,59 @@
                         android:paddingHorizontal="6dp"
                         android:paddingVertical="9dp"
                         android:text="@string/mindstop_morning_step3_short"
-                        android:textAppearance="?attr/textAppearanceLabelMedium" />
+                        android:textAppearance="?attr/textAppearanceLabelSmall" />
                 </com.google.android.material.card.MaterialCardView>
             </LinearLayout>
 
-            <!-- STAGE 1: Out-of-bed 15m window + 5m anti-cheat gate -->
+            <!-- EXTENDED SLEEP PAUSED CARD -->
+            <com.google.android.material.card.MaterialCardView
+                android:id="@+id/activation_extended_card"
+                style="@style/Widget.Mindstop.Card"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:visibility="gone"
+                app:cardBackgroundColor="?attr/colorSecondaryContainer">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:padding="20dp">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/mindstop_morning_extended_card_title"
+                        android:textAppearance="?attr/textAppearanceTitleMedium"
+                        android:textColor="?attr/colorOnSecondaryContainer" />
+
+                    <TextView
+                        android:id="@+id/activation_extended_countdown"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="10dp"
+                        android:textAppearance="?attr/textAppearanceHeadlineMedium"
+                        android:textColor="?attr/colorOnSecondaryContainer" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="@string/mindstop_morning_extended_card_desc"
+                        android:textAppearance="?attr/textAppearanceBodyMedium"
+                        android:textColor="?attr/colorOnSecondaryContainer" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/activation_resume_from_extended_btn"
+                        android:layout_width="match_parent"
+                        android:layout_height="52dp"
+                        android:layout_marginTop="16dp"
+                        android:text="@string/mindstop_morning_extended_resume_now" />
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
+
+            <!-- STAGE 1: Wake up & get out of bed (15m window, 5m unlock gate, 2nd ring unlocks extended sleep) -->
             <com.google.android.material.card.MaterialCardView
                 android:id="@+id/activation_stage1_card"
                 style="@style/Widget.Mindstop.Card"
@@ -111,6 +159,7 @@
                     android:padding="20dp">
 
                     <TextView
+                        android:id="@+id/activation_s1_badge"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="@string/mindstop_morning_s1_badge"
@@ -140,10 +189,22 @@
                         android:layout_marginTop="18dp"
                         android:enabled="false"
                         android:text="@string/mindstop_morning_s1_unlock_btn" />
+
+                    <!-- Low-visual-weight intentional extended sleep button: ONLY shown from 2nd ring -->
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/activation_extend_sleep_btn"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:minHeight="48dp"
+                        android:text="@string/mindstop_morning_extend_entry_btn"
+                        android:textColor="?attr/colorOnPrimaryContainer"
+                        android:visibility="gone" />
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
-            <!-- STAGE 2: Wash up & morning preparation (30m countdown + checklist) -->
+            <!-- STAGE 2: Morning prep (30m countdown + internal Silent Wake Check sub-state + checklist) -->
             <com.google.android.material.card.MaterialCardView
                 android:id="@+id/activation_stage2_card"
                 style="@style/Widget.Mindstop.Card"
@@ -182,6 +243,48 @@
                         android:textAppearance="?attr/textAppearanceBodyMedium"
                         android:textColor="?attr/colorOnSurfaceVariant" />
 
+                    <!-- Internal Silent Wake Check Sub-state Card -->
+                    <com.google.android.material.card.MaterialCardView
+                        android:id="@+id/activation_wakecheck_card"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="14dp"
+                        app:cardBackgroundColor="?attr/colorSecondaryContainer"
+                        app:cardCornerRadius="14dp"
+                        app:cardElevation="0dp"
+                        app:strokeWidth="0dp">
+
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="vertical"
+                            android:padding="14dp">
+
+                            <TextView
+                                android:id="@+id/activation_wakecheck_status"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:textAppearance="?attr/textAppearanceTitleSmall"
+                                android:textColor="?attr/colorOnSecondaryContainer" />
+
+                            <TextView
+                                android:id="@+id/activation_wakecheck_detail"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="4dp"
+                                android:textAppearance="?attr/textAppearanceBodySmall"
+                                android:textColor="?attr/colorOnSecondaryContainer" />
+
+                            <com.google.android.material.button.MaterialButton
+                                android:id="@+id/activation_wakecheck_confirm_btn"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="10dp"
+                                android:text="@string/mindstop_morning_wakecheck_confirm_btn"
+                                android:visibility="gone" />
+                        </LinearLayout>
+                    </com.google.android.material.card.MaterialCardView>
+
                     <LinearLayout
                         android:id="@+id/activation_body_checklist"
                         android:layout_width="match_parent"
@@ -198,7 +301,7 @@
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
-            <!-- STAGE 3: Morning expectation / joy + optional +15m daily quota reward -->
+            <!-- STAGE 3: Strictly Mutually Exclusive 3-Way Reward Choice (A Instant / B Delayed / C Skip) -->
             <com.google.android.material.card.MaterialCardView
                 android:id="@+id/activation_stage3_card"
                 style="@style/Widget.Mindstop.Card"
@@ -222,93 +325,168 @@
                         android:textColor="?attr/colorPrimary" />
 
                     <TextView
-                        android:id="@+id/activation_s3_countdown"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="10dp"
-                        android:textAppearance="?attr/textAppearanceHeadlineMedium"
-                        android:textColor="?attr/colorOnSurface" />
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="14dp"
-                        android:text="@string/mindstop_morning_s3_pick_title"
-                        android:textAppearance="?attr/textAppearanceTitleSmall"
-                        android:textColor="?attr/colorOnSurface" />
-
-                    <RadioGroup
-                        android:id="@+id/activation_joy_group"
+                        android:id="@+id/activation_s3_sub"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="6dp"
-                        android:orientation="vertical" />
+                        android:text="@string/mindstop_morning_s3_mutex_hint"
+                        android:textAppearance="?attr/textAppearanceBodySmall"
+                        android:textColor="?attr/colorOnSurfaceVariant" />
 
-                    <!-- Optional +15 min Bonus Quota Card -->
-                    <com.google.android.material.card.MaterialCardView
+                    <!-- Optional Wakefulness Self-Rating (1..5) -->
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:text="@string/mindstop_morning_rating_prompt"
+                        android:textAppearance="?attr/textAppearanceLabelMedium"
+                        android:textColor="?attr/colorOnSurfaceVariant" />
+
+                    <LinearLayout
+                        android:id="@+id/activation_rating_row"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:orientation="horizontal" />
+
+                    <!-- Choice Picker Container (visible when rewardChoice == NONE) -->
+                    <LinearLayout
+                        android:id="@+id/activation_s3_picker_container"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="14dp"
-                        app:cardBackgroundColor="?attr/colorSecondaryContainer"
-                        app:cardCornerRadius="14dp"
-                        app:cardElevation="0dp"
-                        app:strokeWidth="0dp">
+                        android:orientation="vertical">
 
-                        <LinearLayout
+                        <!-- Choice A: Instant Bounded Joy -->
+                        <com.google.android.material.card.MaterialCardView
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:orientation="vertical"
-                            android:padding="14dp">
+                            app:cardBackgroundColor="?attr/colorPrimaryContainer"
+                            app:cardCornerRadius="14dp"
+                            app:cardElevation="0dp"
+                            app:strokeWidth="0dp">
 
-                            <TextView
-                                android:id="@+id/activation_bonus_title"
-                                android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
-                                android:textAppearance="?attr/textAppearanceTitleSmall"
-                                android:textColor="?attr/colorOnSecondaryContainer" />
-
-                            <TextView
+                            <LinearLayout
                                 android:layout_width="match_parent"
                                 android:layout_height="wrap_content"
-                                android:layout_marginTop="4dp"
-                                android:text="@string/mindstop_morning_s3_bonus_desc"
-                                android:textAppearance="?attr/textAppearanceBodySmall"
-                                android:textColor="?attr/colorOnSecondaryContainer" />
+                                android:orientation="vertical"
+                                android:padding="14dp">
 
-                            <com.google.android.material.materialswitch.MaterialSwitch
-                                android:id="@+id/activation_bonus_afternoon_switch"
+                                <TextView
+                                    android:id="@+id/activation_choice_a_title"
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="wrap_content"
+                                    android:textAppearance="?attr/textAppearanceTitleSmall"
+                                    android:textColor="?attr/colorOnPrimaryContainer" />
+
+                                <RadioGroup
+                                    android:id="@+id/activation_joy_group"
+                                    android:layout_width="match_parent"
+                                    android:layout_height="wrap_content"
+                                    android:layout_marginTop="6dp"
+                                    android:orientation="vertical" />
+
+                                <com.google.android.material.button.MaterialButton
+                                    android:id="@+id/activation_choose_a_btn"
+                                    android:layout_width="match_parent"
+                                    android:layout_height="wrap_content"
+                                    android:layout_marginTop="8dp" />
+                            </LinearLayout>
+                        </com.google.android.material.card.MaterialCardView>
+
+                        <!-- Choice B: Delayed +15m Daily Quota -->
+                        <com.google.android.material.card.MaterialCardView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="12dp"
+                            app:cardBackgroundColor="?attr/colorSecondaryContainer"
+                            app:cardCornerRadius="14dp"
+                            app:cardElevation="0dp"
+                            app:strokeWidth="0dp">
+
+                            <LinearLayout
                                 android:layout_width="match_parent"
                                 android:layout_height="wrap_content"
-                                android:layout_marginTop="8dp"
-                                android:checked="true"
-                                android:text="@string/mindstop_morning_s3_bonus_afternoon_switch"
-                                android:textColor="?attr/colorOnSecondaryContainer" />
+                                android:orientation="vertical"
+                                android:padding="14dp">
 
-                            <com.google.android.material.button.MaterialButton
-                                android:id="@+id/activation_claim_bonus_btn"
-                                style="@style/Widget.Material3.Button.TonalButton"
-                                android:layout_width="match_parent"
-                                android:layout_height="wrap_content"
-                                android:layout_marginTop="8dp" />
-                        </LinearLayout>
-                    </com.google.android.material.card.MaterialCardView>
+                                <TextView
+                                    android:id="@+id/activation_choice_b_title"
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="wrap_content"
+                                    android:textAppearance="?attr/textAppearanceTitleSmall"
+                                    android:textColor="?attr/colorOnSecondaryContainer" />
 
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/activation_complete_btn"
+                                <TextView
+                                    android:id="@+id/activation_choice_b_desc"
+                                    android:layout_width="match_parent"
+                                    android:layout_height="wrap_content"
+                                    android:layout_marginTop="4dp"
+                                    android:textAppearance="?attr/textAppearanceBodySmall"
+                                    android:textColor="?attr/colorOnSecondaryContainer" />
+
+                                <com.google.android.material.button.MaterialButton
+                                    android:id="@+id/activation_choose_b_btn"
+                                    style="@style/Widget.Material3.Button.TonalButton"
+                                    android:layout_width="match_parent"
+                                    android:layout_height="wrap_content"
+                                    android:layout_marginTop="10dp" />
+                            </LinearLayout>
+                        </com.google.android.material.card.MaterialCardView>
+
+                        <!-- Choice C: Skip Reward & Start Day -->
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/activation_choose_c_btn"
+                            style="@style/Widget.Material3.Button.OutlinedButton"
+                            android:layout_width="match_parent"
+                            android:layout_height="48dp"
+                            android:layout_marginTop="12dp"
+                            android:text="@string/mindstop_morning_choice_c_btn" />
+                    </LinearLayout>
+
+                    <!-- Active Instant Reward Running Container (visible ONLY when rewardChoice == INSTANT) -->
+                    <LinearLayout
+                        android:id="@+id/activation_s3_instant_running"
                         android:layout_width="match_parent"
-                        android:layout_height="52dp"
-                        android:layout_marginTop="18dp"
-                        android:text="@string/mindstop_morning_s3_complete_btn" />
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="14dp"
+                        android:orientation="vertical"
+                        android:visibility="gone">
+
+                        <TextView
+                            android:id="@+id/activation_s3_countdown"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:textAppearance="?attr/textAppearanceHeadlineMedium"
+                            android:textColor="?attr/colorOnSurface" />
+
+                        <TextView
+                            android:id="@+id/activation_s3_active_joy_label"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="8dp"
+                            android:textAppearance="?attr/textAppearanceBodyMedium"
+                            android:textColor="?attr/colorOnSurfaceVariant" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/activation_complete_btn"
+                            android:layout_width="match_parent"
+                            android:layout_height="52dp"
+                            android:layout_marginTop="18dp"
+                            android:text="@string/mindstop_morning_s3_complete_btn" />
+                    </LinearLayout>
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
+            <!-- Always-available honest Exit / Emergency Exit (never recorded as COMPLETED) -->
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/activation_back_to_bed_btn"
                 style="@style/Widget.Material3.Button.TextButton"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
-                android:text="@string/mindstop_morning_act_back_to_bed_btn" />
+                android:minHeight="48dp"
+                android:text="@string/mindstop_morning_exit_entry_btn" />
         </LinearLayout>
     </ScrollView>
 </LinearLayout>

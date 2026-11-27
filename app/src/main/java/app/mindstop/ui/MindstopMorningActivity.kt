@@ -1,9 +1,12 @@
 package app.mindstop.ui
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
-import android.provider.Settings
+import android.os.PowerManager
+import android.text.InputType
 import android.text.format.DateFormat
 import android.util.TypedValue
 import android.view.Gravity
@@ -12,17 +15,20 @@ import android.view.ViewGroup
 import android.widget.ArrayAdapter
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.net.toUri
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import app.mindstop.core.MorningAlarm
 import app.mindstop.core.MorningJoyPreset
 import app.mindstop.core.MorningState
+import app.mindstop.core.MorningStatsSummary
+import app.mindstop.core.MorningV2Settings
 import app.mindstop.core.WakeupConfirmMethod
 import app.mindstop.service.MindstopAlarmReceiver
 import app.mindstop.service.MindstopAlarmScheduler
@@ -42,15 +48,16 @@ import neth.iecal.curbox.databinding.ActivityMindstopMorningBinding
 import java.util.Date
 
 /**
- * Morning Activation & Alarm Manager hub (v0.3 SPEC §9–§14).
- * Syncs with the unified Sleep Plan, schedules exact alarms (with a 10s test ring option),
- * resumes active 15-minute morning activation, and shows observational Bedtime <-> Morning trends.
+ * Morning Activation & Alarm Manager hub (Morning Activation V2).
+ * Includes permission diagnostics, configurable V2 stage/wake-check/reward parameters,
+ * local 7/14/30-day behavioral trend stats, alarm scheduling, and bedtime-morning records.
  */
 class MindstopMorningActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMindstopMorningBinding
     private lateinit var repo: MorningRepository
     private var activeSessionId: Long? = null
+    private var statsDaysWindow = 7
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -62,7 +69,11 @@ class MindstopMorningActivity : AppCompatActivity() {
         repo = MorningRepository(this)
 
         binding.morningExactFixBtn.setOnClickListener {
-            OemPermissionRouter.openExactAlarm(this)
+            if (!MindstopAlarmScheduler.canScheduleExact(this)) {
+                OemPermissionRouter.openExactAlarm(this)
+            } else {
+                startActivity(Intent(this, MindstopDiagnosticsActivity::class.java))
+            }
         }
         binding.morningActiveCard.setOnClickListener {
             val sid = activeSessionId ?: return@setOnClickListener
@@ -73,6 +84,11 @@ class MindstopMorningActivity : AppCompatActivity() {
         }
         binding.morningAddAlarm.setOnClickListener { openAlarmEditor(null) }
         binding.morningSyncSleepPlan.setOnClickListener { syncFromSleepPlan() }
+        binding.morningV2SettingsBtn.setOnClickListener { openV2SettingsDialog() }
+
+        binding.morningStats7d.setOnClickListener { selectStatsWindow(7) }
+        binding.morningStats14d.setOnClickListener { selectStatsWindow(14) }
+        binding.morningStats30d.setOnClickListener { selectStatsWindow(30) }
 
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -94,12 +110,56 @@ class MindstopMorningActivity : AppCompatActivity() {
             )
             return
         }
-        val exactOk = MindstopAlarmScheduler.canScheduleExact(this)
-        binding.morningExactWarnCard.visibility = if (exactOk) View.GONE else View.VISIBLE
-        refreshActiveAndLinks()
+        updatePermissionHealthBanner()
+        refreshActiveStatsAndLinks()
     }
 
-    private fun refreshActiveAndLinks() {
+    private fun updatePermissionHealthBanner() {
+        val issues = ArrayList<String>(3)
+        if (!MindstopAlarmScheduler.canScheduleExact(this)) {
+            issues.add(getString(R.string.mindstop_morning_health_exact))
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            issues.add(getString(R.string.mindstop_morning_health_notif))
+        }
+        val pm = getSystemService(PowerManager::class.java)
+        if (pm != null && !pm.isIgnoringBatteryOptimizations(packageName)) {
+            issues.add(getString(R.string.mindstop_morning_health_battery))
+        }
+        if (issues.isEmpty()) {
+            binding.morningExactWarnCard.visibility = View.GONE
+        } else {
+            binding.morningExactWarnCard.visibility = View.VISIBLE
+            binding.morningHealthWarnText.text = getString(
+                R.string.mindstop_morning_health_summary,
+                issues.joinToString(" · ")
+            )
+        }
+    }
+
+    private fun selectStatsWindow(days: Int) {
+        statsDaysWindow = days
+        refreshStatsOnly()
+    }
+
+    private fun refreshStatsOnly() {
+        binding.morningStats7d.alpha = if (statsDaysWindow == 7) 1f else 0.65f
+        binding.morningStats14d.alpha = if (statsDaysWindow == 14) 1f else 0.65f
+        binding.morningStats30d.alpha = if (statsDaysWindow == 30) 1f else 0.65f
+        lifecycleScope.launch {
+            val summary = withContext(Dispatchers.IO) {
+                repo.loadStatsSummary(statsDaysWindow, System.currentTimeMillis())
+            }
+            renderStats(summary)
+        }
+    }
+
+    private fun refreshActiveStatsAndLinks() {
+        binding.morningStats7d.alpha = if (statsDaysWindow == 7) 1f else 0.65f
+        binding.morningStats14d.alpha = if (statsDaysWindow == 14) 1f else 0.65f
+        binding.morningStats30d.alpha = if (statsDaysWindow == 30) 1f else 0.65f
         lifecycleScope.launch {
             val now = System.currentTimeMillis()
             val active = withContext(Dispatchers.IO) { repo.activeSession(now) }
@@ -112,9 +172,132 @@ class MindstopMorningActivity : AppCompatActivity() {
                     stateLabel(active.status)
                 )
             }
+            val summary = withContext(Dispatchers.IO) { repo.loadStatsSummary(statsDaysWindow, now) }
+            renderStats(summary)
             val links = withContext(Dispatchers.IO) { repo.loadRecentLinks(7) }
             renderLinks(links)
         }
+    }
+
+    private fun renderStats(s: MorningStatsSummary) {
+        if (s.totalSessions == 0) {
+            binding.morningStatsBody.setText(R.string.mindstop_morning_stats_empty)
+            return
+        }
+        val ratingStr = if (s.avgWakefulnessRating > 0f) "%.1f / 5".format(s.avgWakefulnessRating) else getString(R.string.mindstop_morning_stats_unrated)
+        binding.morningStatsBody.text = getString(
+            R.string.mindstop_morning_stats_detail,
+            s.daysWindow,
+            s.totalSessions,
+            s.completionRatePercent,
+            s.avgWakeConfirmMin,
+            s.totalExtendedCount,
+            s.totalExtendedMinutes,
+            s.totalWakeCheckTimeouts,
+            s.avgPrepMin,
+            s.avgPostWakeDistractionMin,
+            ratingStr
+        )
+    }
+
+    private fun openV2SettingsDialog() {
+        lifecycleScope.launch {
+            val current = withContext(Dispatchers.IO) { repo.loadSettings() }
+            val scroll = ScrollView(this@MindstopMorningActivity)
+            val form = LinearLayout(this@MindstopMorningActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(20), dp(12), dp(20), dp(8))
+            }
+
+            fun numField(hintRes: Int, value: Int): EditText = EditText(this@MindstopMorningActivity).apply {
+                setHint(hintRes)
+                inputType = InputType.TYPE_CLASS_NUMBER
+                setText(value.toString())
+            }
+
+            val s1Window = numField(R.string.mindstop_morning_cfg_s1_window, current.stage1WindowMin)
+            val s1Unlock = numField(R.string.mindstop_morning_cfg_s1_unlock, current.stage1UnlockMin)
+            val s1Repeat = numField(R.string.mindstop_morning_cfg_s1_repeat, current.stage1RepeatIntervalMin)
+            val latestWake = EditText(this@MindstopMorningActivity).apply {
+                setHint(R.string.mindstop_morning_cfg_latest_wake)
+                setText(
+                    if (current.latestWakeMinuteOfDay in 0..1439) {
+                        "%02d:%02d".format(current.latestWakeMinuteOfDay / 60, current.latestWakeMinuteOfDay % 60)
+                    } else ""
+                )
+            }
+            val s2Duration = numField(R.string.mindstop_morning_cfg_s2_duration, current.stage2DurationMin)
+            val s2MinPrep = numField(R.string.mindstop_morning_cfg_s2_min, current.stage2MinPrepMin)
+            val wcDelay = numField(R.string.mindstop_morning_cfg_wc_delay, current.wakeCheckDelayMin)
+            val wcWindow = numField(R.string.mindstop_morning_cfg_wc_window, current.wakeCheckWindowMin)
+            val stepSwitch = MaterialSwitch(this@MindstopMorningActivity).apply {
+                setText(R.string.mindstop_morning_cfg_step_switch)
+                isChecked = current.stepProofEnabled
+            }
+            val stepThreshold = numField(R.string.mindstop_morning_cfg_step_count, current.stepProofThreshold)
+            val s3Switch = MaterialSwitch(this@MindstopMorningActivity).apply {
+                setText(R.string.mindstop_morning_cfg_s3_switch)
+                isChecked = current.stage3Enabled
+            }
+            val s3Instant = numField(R.string.mindstop_morning_cfg_s3_instant, current.stage3InstantMin)
+            val delayedUnlock = EditText(this@MindstopMorningActivity).apply {
+                setHint(R.string.mindstop_morning_cfg_delayed_unlock)
+                setText("%02d:%02d".format(current.morningRestrictEndMinute / 60, current.morningRestrictEndMinute % 60))
+            }
+            val customPrep = EditText(this@MindstopMorningActivity).apply {
+                setHint(R.string.mindstop_morning_cfg_custom_prep)
+                setText(current.customPrepItems)
+            }
+
+            listOf(
+                s1Window, s1Unlock, s1Repeat, latestWake,
+                s2Duration, s2MinPrep, wcDelay, wcWindow,
+                stepSwitch, stepThreshold, s3Switch, s3Instant,
+                delayedUnlock, customPrep
+            ).forEach { form.addView(it) }
+            scroll.addView(form)
+
+            MaterialAlertDialogBuilder(this@MindstopMorningActivity)
+                .setTitle(R.string.mindstop_morning_v2_settings_btn)
+                .setView(scroll)
+                .setPositiveButton(R.string.mindstop_rule_save) { _, _ ->
+                    val latestMin = parseHhMm(latestWake.text?.toString()) ?: -1
+                    val unlockMin = parseHhMm(delayedUnlock.text?.toString()) ?: current.morningRestrictEndMinute
+                    val updated = MorningV2Settings(
+                        stage1WindowMin = s1Window.text?.toString()?.toIntOrNull()?.coerceIn(5, 60) ?: current.stage1WindowMin,
+                        stage1UnlockMin = s1Unlock.text?.toString()?.toIntOrNull()?.coerceIn(1, 30) ?: current.stage1UnlockMin,
+                        stage1RepeatIntervalMin = s1Repeat.text?.toString()?.toIntOrNull()?.coerceIn(2, 30) ?: current.stage1RepeatIntervalMin,
+                        stage2DurationMin = s2Duration.text?.toString()?.toIntOrNull()?.coerceIn(5, 90) ?: current.stage2DurationMin,
+                        stage2MinPrepMin = s2MinPrep.text?.toString()?.toIntOrNull()?.coerceIn(0, 60) ?: current.stage2MinPrepMin,
+                        wakeCheckDelayMin = wcDelay.text?.toString()?.toIntOrNull()?.coerceIn(1, 30) ?: current.wakeCheckDelayMin,
+                        wakeCheckWindowMin = wcWindow.text?.toString()?.toIntOrNull()?.coerceIn(1, 20) ?: current.wakeCheckWindowMin,
+                        stepProofEnabled = stepSwitch.isChecked,
+                        stepProofThreshold = stepThreshold.text?.toString()?.toIntOrNull()?.coerceIn(10, 200) ?: current.stepProofThreshold,
+                        stage3Enabled = s3Switch.isChecked,
+                        stage3InstantMin = s3Instant.text?.toString()?.toIntOrNull()?.coerceIn(1, 30) ?: current.stage3InstantMin,
+                        delayedBonusMinutes = current.delayedBonusMinutes,
+                        morningRestrictEndMinute = unlockMin,
+                        latestWakeMinuteOfDay = latestMin,
+                        customPrepItems = customPrep.text?.toString()?.trim().orEmpty()
+                    )
+                    lifecycleScope.launch {
+                        withContext(Dispatchers.IO) { repo.saveSettings(updated, System.currentTimeMillis()) }
+                        Toast.makeText(this@MindstopMorningActivity, R.string.mindstop_cs_saved, Toast.LENGTH_SHORT).show()
+                    }
+                }
+                .setNegativeButton(R.string.cancel, null)
+                .show()
+        }
+    }
+
+    private fun parseHhMm(raw: String?): Int? {
+        val cleaned = raw?.trim().orEmpty().replace('：', ':')
+        if (cleaned.isBlank()) return null
+        val parts = cleaned.split(':')
+        val h = parts.getOrNull(0)?.toIntOrNull() ?: return null
+        val m = parts.getOrNull(1)?.toIntOrNull() ?: return null
+        if (parts.size != 2 || h !in 0..23 || m !in 0..59) return null
+        return h * 60 + m
     }
 
     private fun syncFromSleepPlan() {
@@ -399,6 +582,7 @@ class MindstopMorningActivity : AppCompatActivity() {
         MorningState.COMPLETED -> getString(R.string.mindstop_morning_state_completed)
         MorningState.RETURNED_TO_BED -> getString(R.string.mindstop_morning_state_returned)
         MorningState.STAGE1_WAKE -> getString(R.string.mindstop_morning_state_stage1)
+        MorningState.EXTENDED_SLEEP -> getString(R.string.mindstop_morning_state_extended)
         MorningState.STAGE2_PREP -> getString(R.string.mindstop_morning_state_stage2)
         MorningState.STAGE3_REWARD -> getString(R.string.mindstop_morning_state_stage3)
         MorningState.ACTIVATION -> getString(R.string.mindstop_morning_state_activation)

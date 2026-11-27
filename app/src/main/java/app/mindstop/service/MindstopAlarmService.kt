@@ -123,16 +123,18 @@ class MindstopAlarmService : Service() {
                     scope.launch {
                         try {
                             val morningRepo = MorningRepository(applicationContext)
-                            morningRepo.acknowledgeAlarm(sid, System.currentTimeMillis())
-                            val alarm = if (aid > 0L) morningRepo.getAlarm(aid) else null
-                            MindstopAlarmScheduler.scheduleActivationCheckins(
-                                context = applicationContext,
-                                sessionId = sid,
-                                alarmId = aid.coerceAtLeast(0L),
-                                firstCheckMin = 5,
-                                finalCheckMin = 15,
-                                backupReminderEnabled = alarm?.backupReminderEnabled ?: true
-                            )
+                            val snap = morningRepo.acknowledgeAlarm(sid, System.currentTimeMillis())
+                            if (snap != null) {
+                                val settings = morningRepo.loadSettings()
+                                MindstopAlarmScheduler.scheduleStage1Timers(
+                                    context = applicationContext,
+                                    sessionId = sid,
+                                    alarmId = aid.coerceAtLeast(snap.session.alarmId),
+                                    stageToken = snap.meta.stageToken,
+                                    stage1StartWall = snap.meta.stage1StartWall,
+                                    settings = settings
+                                )
+                            }
                         } catch (_: Exception) {
                         }
                         mainHandler.post { stopSelf() }
