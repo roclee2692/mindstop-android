@@ -1079,6 +1079,13 @@
     <!-- v0.3 第二阶段：晨间启动与闹钟 -->
     <string name="mindstop_today_morning">晨间启动</string>
     <string name="mindstop_growth_trigger_morning_wake">完成晨间启动</string>
+    <string name="mindstop_diag_notifications">通知权限（闹钟与静默清醒确认）</string>
+    <string name="mindstop_oem_step_notif_short">通知权限</string>
+    <string name="mindstop_oem_tip_notifications">请允许知止发送通知，避免锁屏闹钟与静默清醒确认被系统拦截。</string>
+    <string name="mindstop_morning_health_fix_btn">立即修复权限</string>
+    <string name="mindstop_morning_alarm_stages_3">三阶段 %1$d+%2$d+%3$d 分钟</string>
+    <string name="mindstop_morning_alarm_stages_2">两阶段 %1$d+%2$d 分钟</string>
+    <string name="mindstop_morning_alarm_meta_v2">%1$s · %2$s · %3$s · %4$s</string>
     <string name="mindstop_diag_exact_alarm">精确闹钟权限（晨间闹钟准时响铃）</string>
     <string name="mindstop_morning_title">晨间启动与闹钟</string>
     <string name="mindstop_morning_subtitle">关闭闹钟只是第一步，按「离床清醒 → 洗漱准备 → 晨间奖励」三阶段串行推进，完成后同日后续闹钟自动跳过。</string>

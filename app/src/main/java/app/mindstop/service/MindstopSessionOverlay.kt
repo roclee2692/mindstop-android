@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.res.Configuration
 import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -11,7 +12,9 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -22,15 +25,17 @@ import app.mindstop.core.OverlayIntensity
 import app.mindstop.core.OverlayPosition
 import app.mindstop.core.OverlaySize
 import app.mindstop.core.SessionCountdown
+import kotlin.math.abs
 import neth.iecal.curbox.R
 
 /**
- * Small floating pill shown over a supervised app: a short goal summary, and a countdown once the
- * plan or the quota gets close to its end. Tapping it opens a panel with the full goal, the search
- * words, and buttons to copy them, finish the goal, or end the session.
+ * Draggable, orientation-aware floating goal & countdown pill shown over a supervised app.
  *
- * Uses TYPE_ACCESSIBILITY_OVERLAY, so no draw over apps permission is needed. Only the pill and
- * the panel take touches; the rest of the screen stays usable. Must be used on the main thread.
+ * - Users can freely drag the pill anywhere inside screen safe bounds so it never permanently
+ *   blocks search bars (e.g. Bilibili / Xiaohongshu top search) or video controls.
+ * - Remembers portrait and landscape positions independently in SharedPreferences.
+ * - Short tap toggles the detail/action panel, which auto-positions inside screen bounds.
+ * - Uses TYPE_ACCESSIBILITY_OVERLAY so no draw-over-apps permission is required.
  */
 class MindstopSessionOverlay(private val context: Context, private val actions: Actions) {
 
@@ -51,13 +56,21 @@ class MindstopSessionOverlay(private val context: Context, private val actions: 
         val isStudyMode: Boolean = false
     )
 
+    companion object {
+        private const val PREFS_NAME = "mindstop_overlay_pos"
+    }
+
     private val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+    private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private val handler = Handler(Looper.getMainLooper())
     private val density = context.resources.displayMetrics.density
+    private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
 
     private var model: Model? = null
     private var pill: TextView? = null
+    private var pillParams: WindowManager.LayoutParams? = null
     private var pillPosition: OverlayPosition? = null
+    private var lastOrientation: Int = -1
     private var panel: View? = null
 
     private val ticker = object : Runnable {
@@ -96,6 +109,13 @@ class MindstopSessionOverlay(private val context: Context, private val actions: 
             if (panel == null) removePill()
             return
         }
+        val orientation = context.resources.configuration.orientation
+        if (pill != null && lastOrientation != -1 && lastOrientation != orientation) {
+            removePanel()
+            removePill()
+        }
+        lastOrientation = orientation
+
         val view = ensurePill(m.settings.position) ?: return
         val countdown = remaining?.let { formatCountdown(it) }
         view.text = when (stage) {
@@ -105,8 +125,8 @@ class MindstopSessionOverlay(private val context: Context, private val actions: 
         }
         val baseSize = when (m.settings.size) {
             OverlaySize.SMALL -> 12f
-            OverlaySize.MEDIUM -> 15f
-            OverlaySize.LARGE -> 19f
+            OverlaySize.MEDIUM -> 14f
+            OverlaySize.LARGE -> 18f
         }
         view.textSize = when (stage) {
             CountdownStage.FINAL -> baseSize * 2.4f
@@ -115,6 +135,7 @@ class MindstopSessionOverlay(private val context: Context, private val actions: 
         }
         view.setTypeface(null, if (stage == CountdownStage.FINAL || stage == CountdownStage.STRONG) Typeface.BOLD else Typeface.NORMAL)
         (view.background as? GradientDrawable)?.setColor(colorFor(stage, m.settings.intensity))
+        clampPillInsideScreen(view)
     }
 
     private fun colorFor(stage: CountdownStage, intensity: OverlayIntensity): Int {
@@ -139,47 +160,156 @@ class MindstopSessionOverlay(private val context: Context, private val actions: 
 
     private fun dp(value: Int): Int = (value * density).toInt()
 
-    private fun baseParams(position: OverlayPosition, yOffset: Int) = WindowManager.LayoutParams(
-        WindowManager.LayoutParams.WRAP_CONTENT,
-        WindowManager.LayoutParams.WRAP_CONTENT,
-        WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-        PixelFormat.TRANSLUCENT
-    ).apply {
-        when (position) {
-            OverlayPosition.TOP -> {
-                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-                y = dp(40) + yOffset
+    private fun screenSize(): Pair<Int, Int> {
+        val dm = context.resources.displayMetrics
+        return dm.widthPixels.coerceAtLeast(320) to dm.heightPixels.coerceAtLeast(480)
+    }
+
+    private fun orientationKey(): String =
+        if (context.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) "land" else "port"
+
+    private fun buildInitialPillParams(position: OverlayPosition): WindowManager.LayoutParams {
+        val (sw, sh) = screenSize()
+        val keyPrefix = "${position.name}_${orientationKey()}"
+        val savedX = prefs.getFloat("${keyPrefix}_x", -1f)
+        val savedY = prefs.getFloat("${keyPrefix}_y", -1f)
+        val defaultX: Int
+        val defaultY: Int
+        if (savedX in 0f..1f && savedY in 0f..1f) {
+            defaultX = (savedX * sw).toInt()
+            defaultY = (savedY * sh).toInt()
+        } else {
+            when (position) {
+                OverlayPosition.TOP -> {
+                    // Tucked right of center below status bar to stay clear of top search inputs.
+                    defaultX = (sw * 0.45f).toInt().coerceAtLeast(dp(12))
+                    defaultY = if (orientationKey() == "land") dp(14) else dp(88)
+                }
+                OverlayPosition.MIDDLE -> {
+                    defaultX = (sw * 0.58f).toInt().coerceAtLeast(dp(12))
+                    defaultY = (sh * 0.44f).toInt()
+                }
+                OverlayPosition.BOTTOM -> {
+                    defaultX = (sw * 0.30f).toInt().coerceAtLeast(dp(12))
+                    defaultY = (sh - dp(128)).coerceAtLeast(dp(64))
+                }
             }
-            OverlayPosition.MIDDLE -> {
-                gravity = Gravity.CENTER_VERTICAL or Gravity.END
-                x = dp(8)
-                y = yOffset
-            }
-            OverlayPosition.BOTTOM -> {
-                gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-                y = dp(96) + yOffset
+        }
+        return WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = defaultX.coerceIn(dp(8), (sw - dp(80)).coerceAtLeast(dp(8)))
+            y = defaultY.coerceIn(dp(12), (sh - dp(64)).coerceAtLeast(dp(12)))
+        }
+    }
+
+    private fun clampPillInsideScreen(view: TextView) {
+        val lp = pillParams ?: return
+        val (sw, sh) = screenSize()
+        val w = view.width.takeIf { it > 0 } ?: dp(140)
+        val h = view.height.takeIf { it > 0 } ?: dp(38)
+        val minY = if (orientationKey() == "land") dp(10) else dp(32)
+        val maxX = (sw - w - dp(8)).coerceAtLeast(dp(8))
+        val maxY = (sh - h - dp(24)).coerceAtLeast(minY)
+        val clampedX = lp.x.coerceIn(dp(8), maxX)
+        val clampedY = lp.y.coerceIn(minY, maxY)
+        if (clampedX != lp.x || clampedY != lp.y) {
+            lp.x = clampedX
+            lp.y = clampedY
+            try {
+                windowManager.updateViewLayout(view, lp)
+            } catch (_: Exception) {
             }
         }
     }
 
-    @SuppressLint("SetTextI18n")
+    private fun savePillPosition(position: OverlayPosition, lp: WindowManager.LayoutParams) {
+        val (sw, sh) = screenSize()
+        val keyPrefix = "${position.name}_${orientationKey()}"
+        prefs.edit()
+            .putFloat("${keyPrefix}_x", (lp.x.toFloat() / sw.toFloat()).coerceIn(0f, 1f))
+            .putFloat("${keyPrefix}_y", (lp.y.toFloat() / sh.toFloat()).coerceIn(0f, 1f))
+            .apply()
+    }
+
+    @SuppressLint("SetTextI18n", "ClickableViewAccessibility")
     private fun ensurePill(position: OverlayPosition): TextView? {
         pill?.let { existing ->
             if (pillPosition == position) return existing
             removePill()
         }
+        val params = buildInitialPillParams(position)
         val view = TextView(context).apply {
             setTextColor(0xFFFFFFFF.toInt())
-            setPadding(dp(16), dp(8), dp(16), dp(8))
+            setPadding(dp(14), dp(7), dp(14), dp(7))
             maxLines = 1
+            maxWidth = (screenSize().first * 0.72f).toInt().coerceAtLeast(dp(160))
+            ellipsize = android.text.TextUtils.TruncateAt.END
             background = GradientDrawable().apply { cornerRadius = dp(20).toFloat() }
-            setOnClickListener { togglePanel() }
         }
+
+        var downRawX = 0f
+        var downRawY = 0f
+        var startX = 0
+        var startY = 0
+        var dragging = false
+
+        view.setOnTouchListener { v, event ->
+            val lp = pillParams ?: return@setOnTouchListener false
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downRawX = event.rawX
+                    downRawY = event.rawY
+                    startX = lp.x
+                    startY = lp.y
+                    dragging = false
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = (event.rawX - downRawX).toInt()
+                    val dy = (event.rawY - downRawY).toInt()
+                    if (!dragging && (abs(dx) > touchSlop || abs(dy) > touchSlop)) {
+                        dragging = true
+                        removePanel()
+                    }
+                    if (dragging) {
+                        val (sw, sh) = screenSize()
+                        val w = v.width.takeIf { it > 0 } ?: dp(140)
+                        val h = v.height.takeIf { it > 0 } ?: dp(38)
+                        val minY = if (orientationKey() == "land") dp(10) else dp(32)
+                        lp.x = (startX + dx).coerceIn(dp(8), (sw - w - dp(8)).coerceAtLeast(dp(8)))
+                        lp.y = (startY + dy).coerceIn(minY, (sh - h - dp(24)).coerceAtLeast(minY))
+                        try {
+                            windowManager.updateViewLayout(v, lp)
+                        } catch (_: Exception) {
+                        }
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    if (dragging) {
+                        savePillPosition(position, lp)
+                    } else if (event.actionMasked == MotionEvent.ACTION_UP) {
+                        togglePanel()
+                    }
+                    dragging = false
+                    true
+                }
+                else -> false
+            }
+        }
+
         return try {
-            windowManager.addView(view, baseParams(position, 0))
+            windowManager.addView(view, params)
             pill = view
+            pillParams = params
             pillPosition = position
+            view.post { clampPillInsideScreen(view) }
             view
         } catch (_: Exception) {
             null
@@ -189,6 +319,7 @@ class MindstopSessionOverlay(private val context: Context, private val actions: 
     private fun removePill() {
         val current = pill ?: return
         pill = null
+        pillParams = null
         pillPosition = null
         try {
             windowManager.removeView(current)
@@ -212,14 +343,36 @@ class MindstopSessionOverlay(private val context: Context, private val actions: 
             }
         }
         fillPanel(box, m)
-        val position = m.settings.position
-        val offset = when (position) {
-            OverlayPosition.TOP -> dp(48)
-            OverlayPosition.MIDDLE -> 0
-            OverlayPosition.BOTTOM -> dp(48)
+        val (sw, sh) = screenSize()
+        val lpPill = pillParams
+        val panelParams = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            if (lpPill != null && lpPill.y > sh / 2) {
+                gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                y = (sh - lpPill.y + dp(8)).coerceIn(dp(48), (sh / 2).coerceAtLeast(dp(64)))
+            } else {
+                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                val topBase = (lpPill?.y ?: dp(88)) + dp(46)
+                y = topBase.coerceIn(dp(48), (sh - dp(240)).coerceAtLeast(dp(48)))
+            }
+        }
+        box.setOnTouchListener { _, event ->
+            if (event.actionMasked == MotionEvent.ACTION_OUTSIDE) {
+                removePanel()
+                true
+            } else {
+                false
+            }
         }
         try {
-            windowManager.addView(box, baseParams(position, offset))
+            windowManager.addView(box, panelParams)
             panel = box
         } catch (_: Exception) {
         }

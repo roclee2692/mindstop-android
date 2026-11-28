@@ -1,11 +1,13 @@
 package app.mindstop.ui
 
+import android.Manifest
 import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
 import android.view.View
 import android.widget.TextView
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
@@ -33,6 +35,25 @@ class MindstopDiagnosticsActivity : AppCompatActivity() {
     private val timeFormat = SimpleDateFormat("MM-dd HH:mm:ss", Locale.getDefault())
     private var wizardStepInProgress: OemPermissionRouter.PermissionStep? = null
 
+    private val notifPermLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (!granted) {
+            OemPermissionRouter.openNotifications(this)
+        } else {
+            refreshChecks()
+        }
+    }
+
+    private fun requestOrOpenNotifications() {
+        val runtimeDenied = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            androidx.core.content.ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (runtimeDenied) {
+            notifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            OemPermissionRouter.openNotifications(this)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMindstopDiagnosticsBinding.inflate(layoutInflater)
@@ -54,7 +75,11 @@ class MindstopDiagnosticsActivity : AppCompatActivity() {
             val next = OemPermissionRouter.pendingSteps(this, includeExactAlarm = true).firstOrNull()
             if (next != null) {
                 wizardStepInProgress = next
-                OemPermissionRouter.openStep(this, next)
+                if (next == OemPermissionRouter.PermissionStep.NOTIFICATIONS) {
+                    requestOrOpenNotifications()
+                } else {
+                    OemPermissionRouter.openStep(this, next)
+                }
             }
         }
         binding.diagAccessibilityButton.setOnClickListener {
@@ -71,6 +96,9 @@ class MindstopDiagnosticsActivity : AppCompatActivity() {
         }
         binding.diagAutostartButton.setOnClickListener {
             OemPermissionRouter.openAutostart(this)
+        }
+        binding.diagNotificationsButton.setOnClickListener {
+            requestOrOpenNotifications()
         }
         binding.diagExactAlarmButton.setOnClickListener {
             OemPermissionRouter.openExactAlarm(this)
@@ -105,7 +133,11 @@ class MindstopDiagnosticsActivity : AppCompatActivity() {
                 .setMessage(getString(R.string.mindstop_wizard_step_next_msg, OemPermissionRouter.stepTitle(this, next), pending.size))
                 .setPositiveButton(R.string.mindstop_wizard_continue_btn) { _, _ ->
                     wizardStepInProgress = next
-                    OemPermissionRouter.openStep(this, next)
+                    if (next == OemPermissionRouter.PermissionStep.NOTIFICATIONS) {
+                        requestOrOpenNotifications()
+                    } else {
+                        OemPermissionRouter.openStep(this, next)
+                    }
                 }
                 .setNegativeButton(R.string.mindstop_wizard_later_btn, null)
                 .show()
@@ -142,6 +174,9 @@ class MindstopDiagnosticsActivity : AppCompatActivity() {
             if (needsAutostart) R.string.mindstop_diag_check_manually else R.string.mindstop_diag_not_needed
         )
         binding.diagAutostartButton.isEnabled = needsAutostart
+
+        val notifOk = OemPermissionRouter.areNotificationsAllowed(this)
+        binding.diagNotificationsStatus.text = statusText(notifOk)
 
         val exactAlarmOk = app.mindstop.service.MindstopAlarmScheduler.canScheduleExact(this)
         binding.diagExactAlarmStatus.text = statusText(exactAlarmOk)

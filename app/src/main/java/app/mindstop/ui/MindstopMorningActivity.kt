@@ -19,6 +19,7 @@ import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
@@ -58,6 +59,16 @@ class MindstopMorningActivity : AppCompatActivity() {
     private lateinit var repo: MorningRepository
     private var activeSessionId: Long? = null
     private var statsDaysWindow = 7
+    private var currentV2Settings: MorningV2Settings = MorningV2Settings()
+    private var lastAlarms: List<MorningAlarm> = emptyList()
+
+    private val notifPermLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (!granted) {
+            OemPermissionRouter.openNotifications(this)
+        } else {
+            updatePermissionHealthBanner()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -69,10 +80,21 @@ class MindstopMorningActivity : AppCompatActivity() {
         repo = MorningRepository(this)
 
         binding.morningExactFixBtn.setOnClickListener {
-            if (!MindstopAlarmScheduler.canScheduleExact(this)) {
-                OemPermissionRouter.openExactAlarm(this)
-            } else {
-                startActivity(Intent(this, MindstopDiagnosticsActivity::class.java))
+            val pm = getSystemService(PowerManager::class.java)
+            when {
+                !OemPermissionRouter.areNotificationsAllowed(this) -> {
+                    val runtimeDenied = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                        ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+                        PackageManager.PERMISSION_GRANTED
+                    if (runtimeDenied) {
+                        notifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    } else {
+                        OemPermissionRouter.openNotifications(this)
+                    }
+                }
+                !MindstopAlarmScheduler.canScheduleExact(this) -> OemPermissionRouter.openExactAlarm(this)
+                pm != null && !pm.isIgnoringBatteryOptimizations(packageName) -> OemPermissionRouter.openBatteryOptimization(this)
+                else -> startActivity(Intent(this, MindstopDiagnosticsActivity::class.java))
             }
         }
         binding.morningActiveCard.setOnClickListener {
@@ -119,9 +141,7 @@ class MindstopMorningActivity : AppCompatActivity() {
         if (!MindstopAlarmScheduler.canScheduleExact(this)) {
             issues.add(getString(R.string.mindstop_morning_health_exact))
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) {
+        if (!OemPermissionRouter.areNotificationsAllowed(this)) {
             issues.add(getString(R.string.mindstop_morning_health_notif))
         }
         val pm = getSystemService(PowerManager::class.java)
@@ -162,6 +182,9 @@ class MindstopMorningActivity : AppCompatActivity() {
         binding.morningStats30d.alpha = if (statsDaysWindow == 30) 1f else 0.65f
         lifecycleScope.launch {
             val now = System.currentTimeMillis()
+            val cfg = withContext(Dispatchers.IO) { repo.loadSettings() }
+            currentV2Settings = cfg
+            if (lastAlarms.isNotEmpty()) renderAlarms(lastAlarms)
             val active = withContext(Dispatchers.IO) { repo.activeSession(now) }
             activeSessionId = active?.id
             val showResume = active != null && active.status.isInActivation
@@ -282,6 +305,8 @@ class MindstopMorningActivity : AppCompatActivity() {
                     )
                     lifecycleScope.launch {
                         withContext(Dispatchers.IO) { repo.saveSettings(updated, System.currentTimeMillis()) }
+                        currentV2Settings = updated
+                        if (lastAlarms.isNotEmpty()) renderAlarms(lastAlarms)
                         Toast.makeText(this@MindstopMorningActivity, R.string.mindstop_cs_saved, Toast.LENGTH_SHORT).show()
                     }
                 }
@@ -320,6 +345,7 @@ class MindstopMorningActivity : AppCompatActivity() {
     }
 
     private fun renderAlarms(alarms: List<MorningAlarm>) {
+        lastAlarms = alarms
         val container = binding.morningAlarmsContainer
         container.removeAllViews()
         val onSurface = MaterialColors.getColor(container, com.google.android.material.R.attr.colorOnSurface)
@@ -364,12 +390,26 @@ class MindstopMorningActivity : AppCompatActivity() {
 
             val meta = TextView(this).apply {
                 val labelPart = alarm.label.ifBlank { getString(R.string.mindstop_morning_ring_default_label) }
+                val stageSummary = if (currentV2Settings.stage3Enabled) {
+                    getString(
+                        R.string.mindstop_morning_alarm_stages_3,
+                        currentV2Settings.stage1WindowMin,
+                        currentV2Settings.stage2DurationMin,
+                        currentV2Settings.stage3InstantMin
+                    )
+                } else {
+                    getString(
+                        R.string.mindstop_morning_alarm_stages_2,
+                        currentV2Settings.stage1WindowMin,
+                        currentV2Settings.stage2DurationMin
+                    )
+                }
                 text = getString(
-                    R.string.mindstop_morning_alarm_meta,
+                    R.string.mindstop_morning_alarm_meta_v2,
                     labelPart,
                     repeatLabel(alarm.repeatDaysMask),
                     methodLabel(alarm.dismissMethod),
-                    alarm.totalActivationMinutes
+                    stageSummary
                 )
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                 setTextColor(onVariant)

@@ -20,7 +20,9 @@ import app.mindstop.core.DayKeys
 import app.mindstop.core.FocusEngine
 import app.mindstop.core.FocusInterruptNode
 import app.mindstop.core.FocusStatus
+import android.view.inputmethod.InputMethodManager
 import app.mindstop.core.ForegroundAccountant
+import app.mindstop.core.ForegroundFilter
 import app.mindstop.core.IntentPurpose
 import app.mindstop.core.IntentStatus
 import app.mindstop.core.IntentionGate
@@ -69,8 +71,8 @@ class MindstopEngine {
         const val PROMPT_RETRY_MS = 4_000L
         const val PROMPT_VERIFY_DELAY_MS = 900L
         const val BLOCK_MIN_GAP_MS = 1_500L
+        const val EXIT_REWARD_DEBOUNCE_MS = 3_000L
         const val KEY_BEDTIME_ALLOW_UNTIL = "bedtime_allow_until"
-        private val IGNORED_PACKAGES = setOf("com.android.systemui")
     }
 
     private lateinit var service: BaseBlockingService
@@ -109,6 +111,33 @@ class MindstopEngine {
     private var lastSupervisedSessionId: Long? = null
     private var lastSupervisedBlocked: Boolean = false
     private var reminderFiredInSessionId: Long? = null
+    private var pendingExitRewardRunnable: Runnable? = null
+    @Volatile private var cachedImePackages: Set<String> = emptySet()
+    @Volatile private var lastImeRefreshWall: Long = 0L
+
+    private fun currentImePackages(): Set<String> {
+        val now = System.currentTimeMillis()
+        if (cachedImePackages.isNotEmpty() && now - lastImeRefreshWall < 5 * 60_000L) {
+            return cachedImePackages
+        }
+        val list = try {
+            val imm = service.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+            imm?.enabledInputMethodList?.map { it.packageName }?.toSet() ?: emptySet()
+        } catch (_: Exception) {
+            emptySet()
+        }
+        cachedImePackages = list
+        lastImeRefreshWall = now
+        return list
+    }
+
+    private fun isTransientSystemUi(pkg: String?): Boolean =
+        ForegroundFilter.isTransientSystemWindow(pkg, currentImePackages())
+
+    private fun cancelPendingExitReward() {
+        pendingExitRewardRunnable?.let { mainHandler.removeCallbacks(it) }
+        pendingExitRewardRunnable = null
+    }
 
     fun setup(service: BaseBlockingService) {
         this.service = service
@@ -153,7 +182,12 @@ class MindstopEngine {
 
     private suspend fun onForegroundPackage(rawPackage: String) {
         if (destroyed) return
-        val supervised = rawPackage.isNotEmpty() && rawPackage != ownPackage && rawPackage !in IGNORED_PACKAGES
+        // Truly ignore transient system overlays (Control Center, notification shade, volume UI,
+        // permission sheets, IMEs) so pulling down Control Center NEVER triggers a fake exit reward
+        // or interrupts the active foreground session.
+        if (isTransientSystemUi(rawPackage)) return
+
+        val supervised = rawPackage.isNotEmpty() && rawPackage != ownPackage
         val packageName = if (supervised) rawPackage else null
         val nowElapsed = SystemClock.elapsedRealtime()
         val nowWall = trustedNow()
@@ -172,6 +206,10 @@ class MindstopEngine {
             val rules = repo.loadRules()
             val exempt = repo.loadExempt()
             val supervisedSet = RuleEngine.supervisedPackages(rules, exempt)
+            if (packageName in supervisedSet) {
+                // User returned within debounce window (e.g. gesture slip) -> cancel pending exit reward!
+                cancelPendingExitReward()
+            }
             val nightRestricted = BedtimeEngine.isRestrictedAtNight(bedtime, packageName, packageName in supervisedSet, exempt)
             val cancelled = rewards.cancelOnReentry(packageName, nowWall, nightRestricted = nightRestricted)
             if (cancelled.isNotEmpty()) {
@@ -203,7 +241,8 @@ class MindstopEngine {
         tickActiveFocus(nowWall, enteredPackage = if (changed) packageName else null)
 
         // Stage 4: detect natural voluntary exit when the user leaves a supervised (non-blocked)
-        // app to Home or another non-supervised app (never when Mindstop's own UI pops over it).
+        // app to Home or another non-supervised app, debounced by 3s so transient gesture slips
+        // never cause reward ping-pong.
         if (changed && rawPackage != ownPackage && previousPackage != null &&
             previousPackage == lastSupervisedPackage && !lastSupervisedBlocked &&
             lastSupervisedSessionId != null
@@ -213,11 +252,12 @@ class MindstopEngine {
             val supervisedSet = RuleEngine.supervisedPackages(rules, exempt)
             val stayedInSupervised = packageName != null && packageName in supervisedSet
             if (!stayedInSupervised) {
+                val exitPkg = previousPackage
                 val exitSession = lastSupervisedSessionId!!
                 lastSupervisedPackage = null
                 lastSupervisedSessionId = null
                 lastSupervisedBlocked = false
-                issueRewardAndFeedback(previousPackage, exitSession, RewardTrigger.ACTIVE_EXIT, nowWall)
+                scheduleDebouncedExitReward(exitPkg, exitSession)
             }
         }
 
@@ -227,6 +267,26 @@ class MindstopEngine {
             clearPromptFallback()
             hideSessionOverlay()
         }
+    }
+
+    private fun scheduleDebouncedExitReward(exitPkg: String, exitSession: Long) {
+        cancelPendingExitReward()
+        val task = Runnable {
+            pendingExitRewardRunnable = null
+            if (destroyed) return@Runnable
+            scope.launch {
+                val currentPkg = accountant.currentPackage
+                val rules = repo.loadRules()
+                val exempt = repo.loadExempt()
+                val supervisedSet = RuleEngine.supervisedPackages(rules, exempt)
+                // Only award ACTIVE_EXIT if user is STILL outside supervised apps after debounce.
+                if (currentPkg == null || currentPkg !in supervisedSet) {
+                    issueRewardAndFeedback(exitPkg, exitSession, RewardTrigger.ACTIVE_EXIT, trustedNow())
+                }
+            }
+        }
+        pendingExitRewardRunnable = task
+        mainHandler.postDelayed(task, EXIT_REWARD_DEBOUNCE_MS)
     }
 
     private val sessionOverlay by lazy {
@@ -528,8 +588,8 @@ class MindstopEngine {
         if (destroyed) return
         if (screenOn) {
             val active = activeWindowPackage()
-            if (active != null) {
-                val supervised = active.isNotEmpty() && active != ownPackage && active !in IGNORED_PACKAGES
+            if (active != null && !isTransientSystemUi(active)) {
+                val supervised = active.isNotEmpty() && active != ownPackage
                 val desired = if (supervised) active else null
                 if (desired != accountant.currentPackage) {
                     onForegroundPackage(active)
@@ -1091,6 +1151,7 @@ class MindstopEngine {
     fun onDestroy() {
         if (destroyed) return
         destroyed = true
+        cancelPendingExitReward()
         mainHandler.removeCallbacksAndMessages(null)
         if (!::service.isInitialized) {
             scope.cancel()

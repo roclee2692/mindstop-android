@@ -1,13 +1,17 @@
 package app.mindstop.ui
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
 import android.widget.Toast
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import app.mindstop.core.OemFamily
 import app.mindstop.core.OemProfile
@@ -30,7 +34,18 @@ object OemPermissionRouter {
         OVERLAY,
         BATTERY,
         BACKGROUND_POPUP,
+        NOTIFICATIONS,
         EXACT_ALARM,
+    }
+
+    fun areNotificationsAllowed(context: Context): Boolean {
+        val enabled = NotificationManagerCompat.from(context).areNotificationsEnabled()
+        if (!enabled) return false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            return ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) ==
+                PackageManager.PERMISSION_GRANTED
+        }
+        return true
     }
 
     fun currentFamily(): OemFamily = OemProfile.classify(Build.MANUFACTURER, Build.BRAND)
@@ -95,6 +110,10 @@ object OemPermissionRouter {
             list += PermissionStep.BACKGROUND_POPUP
         }
 
+        if (!areNotificationsAllowed(context)) {
+            list += PermissionStep.NOTIFICATIONS
+        }
+
         if (includeExactAlarm && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
             !app.mindstop.service.MindstopAlarmScheduler.canScheduleExact(context)
         ) {
@@ -108,6 +127,7 @@ object OemPermissionRouter {
         PermissionStep.OVERLAY -> context.getString(R.string.mindstop_diag_overlay)
         PermissionStep.BATTERY -> context.getString(R.string.mindstop_oem_step_battery_short)
         PermissionStep.BACKGROUND_POPUP -> context.getString(R.string.mindstop_oem_step_bgpopup_short)
+        PermissionStep.NOTIFICATIONS -> context.getString(R.string.mindstop_oem_step_notif_short)
         PermissionStep.EXACT_ALARM -> context.getString(R.string.mindstop_oem_step_alarm_short)
     }
 
@@ -117,8 +137,21 @@ object OemPermissionRouter {
             PermissionStep.OVERLAY -> openOverlay(context)
             PermissionStep.BATTERY -> openBatteryOptimization(context)
             PermissionStep.BACKGROUND_POPUP -> openBackgroundPopup(context)
+            PermissionStep.NOTIFICATIONS -> openNotifications(context)
             PermissionStep.EXACT_ALARM -> openExactAlarm(context)
         }
+    }
+
+    fun openNotifications(context: Context) {
+        showGuideToast(context, context.getString(R.string.mindstop_oem_tip_notifications))
+        val candidates = ArrayList<Intent>()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            candidates += Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+            }
+        }
+        candidates += appDetailsIntent(context)
+        launchFirstAvailable(context, candidates)
     }
 
     fun openAccessibility(context: Context) {

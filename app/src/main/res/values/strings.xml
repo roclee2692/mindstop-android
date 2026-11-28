@@ -1609,6 +1609,13 @@
     <!-- v0.3 Phase 2: Morning Activation & Alarm -->
     <string name="mindstop_today_morning">Morning</string>
     <string name="mindstop_growth_trigger_morning_wake">Morning activation</string>
+    <string name="mindstop_diag_notifications">Notifications (alarms and silent wake check)</string>
+    <string name="mindstop_oem_step_notif_short">Notifications</string>
+    <string name="mindstop_oem_tip_notifications">Allow notifications so lock screen alarms and silent wake checks are never silenced by the system.</string>
+    <string name="mindstop_morning_health_fix_btn">Fix permissions now</string>
+    <string name="mindstop_morning_alarm_stages_3">3 stages %1$d+%2$d+%3$d min</string>
+    <string name="mindstop_morning_alarm_stages_2">2 stages %1$d+%2$d min</string>
+    <string name="mindstop_morning_alarm_meta_v2">%1$s · %2$s · %3$s · %4$s</string>
     <string name="mindstop_diag_exact_alarm">Exact alarm permission (timely morning alarm)</string>
     <string name="mindstop_morning_title">Morning activation and alarms</string>
     <string name="mindstop_morning_subtitle">Dismissing the alarm is step one. Progress sequentially through wake up, prep, and reward; later backup alarms auto skip once you are up.</string>
